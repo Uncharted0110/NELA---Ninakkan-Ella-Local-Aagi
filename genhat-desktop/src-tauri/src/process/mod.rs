@@ -8,8 +8,8 @@ pub mod lifecycle;
 
 use crate::backends::{self, ModelBackend};
 use crate::registry::types::{
-    ManagedInstance, ManagedModel, ModelHandle, ModelInfo, ModelStatus, TaskRequest,
-    TaskResponse,
+    ManagedInstance, ManagedModel, ModelDef, ModelHandle, ModelInfo,
+    ModelStatus, TaskRequest, TaskResponse, TaskType,
 };
 use crate::registry::ModelRegistry;
 use std::collections::HashMap;
@@ -21,12 +21,14 @@ use tokio::sync::RwLock;
 pub struct ProcessManager {
     /// model_id → managed model (instances + backend)
     models: Arc<RwLock<HashMap<String, ManagedModel>>>,
-    /// Prebuilt backends keyed by model_id
-    backends: HashMap<String, Arc<dyn ModelBackend>>,
+    /// Backends keyed by model_id (wrapped for runtime registration)
+    backends: Arc<RwLock<HashMap<String, Arc<dyn ModelBackend>>>>,
     /// Absolute path to the models directory
     models_dir: PathBuf,
     /// Global memory budget in MB (0 = unlimited)
     memory_budget_mb: u32,
+    /// Currently-active LLM model id (for legacy commands)
+    active_llm_id: Arc<RwLock<String>>,
 }
 
 impl std::fmt::Debug for ProcessManager {
@@ -58,9 +60,10 @@ impl ProcessManager {
 
         Self {
             models: Arc::new(RwLock::new(managed)),
-            backends: backend_map,
+            backends: Arc::new(RwLock::new(backend_map)),
             models_dir,
             memory_budget_mb: 0, // 0 = unlimited, set via config later
+            active_llm_id: Arc::new(RwLock::new("lfm-1_2b".to_string())),
         }
     }
 
@@ -72,6 +75,54 @@ impl ProcessManager {
     /// Get the models directory path.
     pub fn models_dir(&self) -> &PathBuf {
         &self.models_dir
+    }
+
+    /// Get the currently-active LLM model id.
+    pub async fn active_llm_id(&self) -> String {
+        self.active_llm_id.read().await.clone()
+    }
+
+    /// Set the currently-active LLM model id.
+    pub async fn set_active_llm(&self, id: &str) {
+        *self.active_llm_id.write().await = id.to_string();
+    }
+
+    /// Dynamically register a new model at runtime.
+    /// If a model with the same ID already exists, it will be stopped and replaced.
+    pub async fn register_model(&self, def: ModelDef) -> Result<(), String> {
+        let model_id = def.id.clone();
+
+        // Stop existing model if present
+        if self.backends.read().await.contains_key(&model_id) {
+            let _ = self.stop_model(&model_id).await;
+        }
+
+        // Create backend
+        let backend: Arc<dyn ModelBackend> = Arc::from(backends::create_backend(&def));
+
+        // Insert into backends map
+        self.backends.write().await.insert(model_id.clone(), backend);
+
+        // Insert into models map
+        self.models.write().await.insert(
+            model_id.clone(),
+            ManagedModel {
+                def,
+                instances: Vec::new(),
+            },
+        );
+
+        log::info!("Dynamically registered model '{model_id}'");
+        Ok(())
+    }
+
+    /// Unregister a dynamically-added model, stopping all its instances first.
+    pub async fn unregister_model(&self, model_id: &str) -> Result<(), String> {
+        self.stop_model(model_id).await?;
+        self.backends.write().await.remove(model_id);
+        self.models.write().await.remove(model_id);
+        log::info!("Unregistered model '{model_id}'");
+        Ok(())
     }
 
     /// Ensure at least one instance of a model is running and available.
@@ -86,6 +137,8 @@ impl ProcessManager {
     ) -> Result<String, String> {
         let backend = self
             .backends
+            .read()
+            .await
             .get(model_id)
             .ok_or_else(|| format!("No backend registered for model '{model_id}'"))?
             .clone();
@@ -135,18 +188,23 @@ impl ProcessManager {
             .count() as u32;
 
         if active_count >= max_instances {
-            // Try to find an instance that is Ready (even if busy) — queue behind it
-            for inst in &managed.instances {
-                if inst.status == ModelStatus::Ready {
-                    log::debug!(
-                        "All instances busy for '{model_id}', queuing on '{}'",
-                        inst.instance_id
-                    );
-                    return Ok(inst.instance_id.clone());
-                }
+            // All slots taken — pick the instance with the fewest in-flight requests
+            // so the backend (e.g. llama-server HTTP API) can handle the concurrency.
+            if let Some(inst) = managed
+                .instances
+                .iter()
+                .filter(|i| i.status != ModelStatus::ShuttingDown)
+                .min_by_key(|i| i.active_requests)
+            {
+                log::debug!(
+                    "All instances occupied for '{model_id}', routing to least-loaded '{}' (active_requests={})",
+                    &inst.instance_id[..8],
+                    inst.active_requests,
+                );
+                return Ok(inst.instance_id.clone());
             }
             return Err(format!(
-                "Model '{model_id}' at max instances ({max_instances}) and all are busy/loading",
+                "Model '{model_id}' at max instances ({max_instances}) and all are shutting down",
             ));
         }
 
@@ -182,7 +240,7 @@ impl ProcessManager {
                         .iter_mut()
                         .find(|i| i.instance_id == instance_id)
                     {
-                        inst.handle = Some(handle);
+                        inst.handle = Some(Arc::new(handle));
                         inst.status = ModelStatus::Ready;
                         inst.last_activity = std::time::Instant::now();
                         log::info!(
@@ -215,6 +273,8 @@ impl ProcessManager {
     ) -> Result<TaskResponse, String> {
         let backend = self
             .backends
+            .read()
+            .await
             .get(model_id)
             .ok_or_else(|| format!("No backend for '{model_id}'"))?
             .clone();
@@ -246,9 +306,10 @@ impl ProcessManager {
         }
 
 
-        // Execute on the backend.
-        // We hold the read lock only during the execute() call.
-        let result = {
+        // Extract the handle while briefly holding the read lock, then drop it
+        // before the potentially long-running backend.execute() call so writers
+        // (ensure_running, stop_model, reap_idle) are not starved.
+        let handle = {
             let models = self.models.read().await;
             let managed = models.get(model_id).ok_or("Model not found")?;
             let inst = managed
@@ -257,12 +318,12 @@ impl ProcessManager {
                 .find(|i| i.instance_id == *instance_id)
                 .ok_or("Instance not found")?;
 
-            let handle = inst.handle.as_ref().ok_or("Instance handle not ready")?;
-
-            backend
-                .execute(handle, &enriched_request, &self.models_dir)
-                .await
+            inst.handle.as_ref().cloned().ok_or("Instance handle not ready")?
         };
+
+        let result = backend
+            .execute(&handle, &enriched_request, &self.models_dir)
+            .await;
 
         // Mark instance as ready again, update last_activity
         {
@@ -283,7 +344,7 @@ impl ProcessManager {
 
     /// Stop a specific model (all instances).
     pub async fn stop_model(&self, model_id: &str) -> Result<(), String> {
-        let backend = self.backends.get(model_id).cloned();
+        let backend = self.backends.read().await.get(model_id).cloned();
         let mut models = self.models.write().await;
 
         if let Some(managed) = models.get_mut(model_id) {
@@ -298,9 +359,10 @@ impl ProcessManager {
     /// Stop all models — called on app exit.
     pub async fn stop_all(&self) {
         log::info!("ProcessManager: stopping all models...");
+        let backends = self.backends.read().await;
         let mut models = self.models.write().await;
         for (model_id, managed) in models.iter_mut() {
-            let backend = self.backends.get(model_id).cloned();
+            let backend = backends.get(model_id).cloned();
             for inst in managed.instances.drain(..) {
                 inst_stop(&backend, inst).await;
             }
@@ -355,16 +417,39 @@ impl ProcessManager {
         })
     }
 
+    /// Find a dynamically-registered model that supports a given task type.
+    /// Returns the model_id of the highest-priority match, if any.
+    pub async fn find_model_for_task(&self, task: &TaskType) -> Option<String> {
+        let models = self.models.read().await;
+        let mut best: Option<(&str, u32)> = None;
+        for (id, managed) in models.iter() {
+            if managed.def.tasks.contains(task) {
+                match best {
+                    Some((_, pri)) if managed.def.priority <= pri => {}
+                    _ => best = Some((id.as_str(), managed.def.priority)),
+                }
+            }
+        }
+        best.map(|(id, _)| id.to_string())
+    }
+
+    /// Get a clone of the ModelDef for a specific model id.
+    pub async fn get_model_def(&self, model_id: &str) -> Option<ModelDef> {
+        let models = self.models.read().await;
+        models.get(model_id).map(|m| m.def.clone())
+    }
+
     /// Get the port of a running llama-server instance (for frontend streaming).
     pub async fn get_llama_port(&self, model_id: &str) -> Option<u16> {
         let models = self.models.read().await;
         models.get(model_id).and_then(|m| {
             m.instances.iter().find_map(|inst| {
-                if let Some(ModelHandle::Process(ph)) = &inst.handle {
-                    ph.port
-                } else {
-                    None
+                if let Some(handle) = &inst.handle {
+                    if let ModelHandle::Process(ph) = handle.as_ref() {
+                        return ph.port;
+                    }
                 }
+                None
             })
         })
     }
@@ -375,8 +460,10 @@ impl ProcessManager {
         models.get(model_id).and_then(|m| {
             m.instances.iter().find_map(|inst| {
                 if inst.instance_id == instance_id {
-                    if let Some(ModelHandle::Process(ph)) = &inst.handle {
-                        return ph.port;
+                    if let Some(handle) = &inst.handle {
+                        if let ModelHandle::Process(ph) = handle.as_ref() {
+                            return ph.port;
+                        }
                     }
                 }
                 None
@@ -413,7 +500,7 @@ impl ProcessManager {
                 continue; // 0 means fire-and-forget backends handle their own cleanup
             }
 
-            let backend = self.backends.get(model_id).cloned();
+            let backend = self.backends.read().await.get(model_id).cloned();
             let mut to_remove = Vec::new();
 
             for (idx, inst) in managed.instances.iter().enumerate() {

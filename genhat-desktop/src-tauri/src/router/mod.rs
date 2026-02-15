@@ -11,6 +11,7 @@ pub mod tasks;
 use crate::process::pool;
 use crate::process::ProcessManager;
 use crate::registry::types::{TaskRequest, TaskResponse, TaskType};
+use crate::registry::types::ModelDef;
 use crate::registry::ModelRegistry;
 use std::sync::Arc;
 
@@ -46,7 +47,7 @@ impl TaskRouter {
         }
 
         // Determine the model to use
-        let model_id = self.resolve_model(request)?;
+        let model_id = self.resolve_model(request).await?;
         let is_ephemeral = pool::is_ephemeral_task(&request.task_type);
 
         log::info!(
@@ -69,25 +70,41 @@ impl TaskRouter {
     }
 
     /// Resolve which model should handle a request.
-    fn resolve_model(&self, request: &TaskRequest) -> Result<String, String> {
+    /// Checks the static registry first, then falls back to dynamically
+    /// registered models in the ProcessManager.
+    async fn resolve_model(&self, request: &TaskRequest) -> Result<String, String> {
         // If the user specified a model override, use it
         if let Some(ref override_id) = request.model_override {
+            // Check static registry first
             if self.registry.get(override_id).is_some() {
                 return Ok(override_id.clone());
             }
-            return Err(format!("Model override '{override_id}' not found in registry"));
+            // Check dynamic models in ProcessManager
+            if self.process_manager.model_status(override_id).await.is_some() {
+                return Ok(override_id.clone());
+            }
+            return Err(format!("Model override '{override_id}' not found"));
         }
 
-        // Find the highest-priority model that supports this task
+        // Find the highest-priority model from the static registry
         let candidates = self.registry.find_for_task(&request.task_type);
-        if candidates.is_empty() {
-            return Err(format!(
-                "No model registered for task type '{}'",
-                request.task_type
-            ));
+        if !candidates.is_empty() {
+            return Ok(candidates[0].id.clone());
         }
 
-        Ok(candidates[0].id.clone())
+        // Fall back to dynamically registered models
+        if let Some(dynamic_id) = self
+            .process_manager
+            .find_model_for_task(&request.task_type)
+            .await
+        {
+            return Ok(dynamic_id);
+        }
+
+        Err(format!(
+            "No model registered for task type '{}'",
+            request.task_type
+        ))
     }
 
     /// Compound task: podcast generation (LLM script → TTS audio).
@@ -142,5 +159,19 @@ impl TaskRouter {
     /// (used by frontend for direct SSE streaming).
     pub async fn get_llama_port(&self, model_id: &str) -> Option<u16> {
         self.process_manager.get_llama_port(model_id).await
+    }
+
+    /// Look up the ModelDef for a given task type.
+    /// Checks the static registry first, then falls back to dynamically
+    /// registered models in the ProcessManager.
+    pub async fn get_model_def_for_task(&self, task: &TaskType) -> Option<ModelDef> {
+        // Try static registry first
+        let candidates = self.registry.find_for_task(task);
+        if let Some(def) = candidates.first() {
+            return Some((*def).clone());
+        }
+        // Fall back to dynamic models
+        let model_id = self.process_manager.find_model_for_task(task).await?;
+        self.process_manager.get_model_def(&model_id).await
     }
 }

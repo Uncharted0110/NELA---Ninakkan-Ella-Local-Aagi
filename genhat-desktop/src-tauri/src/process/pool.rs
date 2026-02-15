@@ -7,7 +7,7 @@
 //! - Work-stealing between models
 //! - Weighted fair scheduling
 
-use crate::registry::types::TaskType;
+use crate::registry::types::{TaskPriority, TaskType};
 
 /// Determine the priority of a task type.
 pub fn task_priority(task: &TaskType) -> TaskPriority {
@@ -33,13 +33,6 @@ pub fn task_priority(task: &TaskType) -> TaskPriority {
         // Custom tasks default to high (assume user-facing)
         TaskType::Custom(_) => TaskPriority::High,
     }
-}
-
-/// Priority levels for task scheduling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum TaskPriority {
-    Low = 0,
-    High = 1,
 }
 
 /// Whether a task type is ephemeral (instance should be killed after completion).

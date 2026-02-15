@@ -83,6 +83,7 @@ dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
  "dashmap",
+ "libc",
  "log",
  "portpicker",
  "reqwest 0.12.28",

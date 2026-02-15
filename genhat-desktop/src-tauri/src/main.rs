@@ -88,7 +88,6 @@ fn main() {
             app_lib::commands::inference::route_request,
             app_lib::commands::inference::vision_chat,
             app_lib::commands::inference::vision_chat_stream,
-            app_lib::commands::inference::get_vision_port,
             app_lib::commands::audio::transcribe_audio,
         ])
         .build(tauri::generate_context!())

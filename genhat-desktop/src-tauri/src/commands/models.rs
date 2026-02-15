@@ -1,7 +1,10 @@
 //! Model management commands — list, start, stop, status.
 
 use crate::process::ProcessManager;
-use crate::registry::types::{ModelInfo, ModelStatus};
+use crate::registry::types::{
+    BackendKind, ModelDef, ModelInfo, ModelKind, ModelStatus, TaskType,
+};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
@@ -119,7 +122,7 @@ pub async fn stop_model(
 }
 
 /// Switch to a different LLM model by file path.
-/// Legacy-compatible: kills existing llama-server, starts new one.
+/// Dynamically registers the model, stops the previous active LLM, and starts the new one.
 #[tauri::command]
 pub async fn switch_model(
     model_path: String,
@@ -130,12 +133,50 @@ pub async fn switch_model(
         return Err(format!("Model file not found: {model_path}"));
     }
 
-    // Stop the current LLM model
-    state.0.stop_model("lfm-1_2b").await?;
+    // Derive a model ID from the filename (e.g. "MyModel-Q4_0.gguf" → "mymodel-q4_0")
+    let file_name = path
+        .file_stem()
+        .ok_or("Invalid model path: no filename")?
+        .to_string_lossy()
+        .to_string();
+    let model_id = file_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' })
+        .collect::<String>();
 
-    // Start the new one — re-use the lfm-1_2b slot
-    // (In the future, this should create a dynamic registry entry)
-    let instance_id = state.0.ensure_running("lfm-1_2b", false).await?;
+    // Stop the currently-active LLM
+    let prev_id = state.0.active_llm_id().await;
+    let _ = state.0.stop_model(&prev_id).await;
+
+    // Build a ModelDef for the new model.
+    // Use the absolute path as model_file — Path::join with an absolute path
+    // ignores the base, so the backend will use it directly.
+    let def = ModelDef {
+        id: model_id.clone(),
+        name: file_name.clone(),
+        backend: BackendKind::LlamaServer,
+        kind: ModelKind::ChildProcess,
+        model_file: model_path.clone(),
+        tasks: vec![
+            TaskType::Chat,
+            TaskType::Summarize,
+            TaskType::Mindmap,
+            TaskType::Enrich,
+            TaskType::Grade,
+            TaskType::Hyde,
+        ],
+        auto_start: false,
+        max_instances: 2,
+        idle_timeout_s: 0,
+        priority: 10,
+        memory_mb: 1400,
+        params: HashMap::new(),
+    };
+
+    // Register and start the new model
+    state.0.register_model(def).await?;
+    let instance_id = state.0.ensure_running(&model_id, false).await?;
+    state.0.set_active_llm(&model_id).await;
 
     Ok(format!("server started (instance: {})", &instance_id[..8]))
 }
@@ -143,7 +184,8 @@ pub async fn switch_model(
 /// Stop the LLM server. Legacy-compatible.
 #[tauri::command]
 pub async fn stop_llama(state: State<'_, ProcessManagerState>) -> Result<(), String> {
-    state.0.stop_model("lfm-1_2b").await
+    let active_id = state.0.active_llm_id().await;
+    state.0.stop_model(&active_id).await
 }
 
 /// Get the port of the running llama-server (for frontend SSE streaming).
@@ -151,11 +193,12 @@ pub async fn stop_llama(state: State<'_, ProcessManagerState>) -> Result<(), Str
 pub async fn get_llama_port(
     state: State<'_, ProcessManagerState>,
 ) -> Result<u16, String> {
+    let active_id = state.0.active_llm_id().await;
     // Ensure it's running first
-    let _ = state.0.ensure_running("lfm-1_2b", false).await?;
+    let _ = state.0.ensure_running(&active_id, false).await?;
     state
         .0
-        .get_llama_port("lfm-1_2b")
+        .get_llama_port(&active_id)
         .await
         .ok_or_else(|| "LLM not running or no port assigned".to_string())
 }

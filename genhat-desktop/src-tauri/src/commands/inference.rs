@@ -98,44 +98,48 @@ pub async fn vision_chat(
 
 /// Get the port for the vision model server (triggers lazy load).
 /// Returns the port number so frontend can stream directly.
-#[tauri::command]
-pub async fn get_vision_port(
-    router_state: State<'_, TaskRouterState>,
-) -> Result<u16, String> {
-    // Use the router to find the vision model and ensure it's running
-    let pm = &router_state.0.process_manager;
-    
-    // Ensure the vision model is running
-    let instance_id = pm.ensure_running("lfm-2_5-vl", false).await?;
-    
-    // Get the port from the running instance
-    let port: Option<u16> = pm.get_instance_port("lfm-2_5-vl", &instance_id).await;
-    port.ok_or_else(|| "Vision model has no port assigned".to_string())
-}
 
 /// Streaming vision chat command — emits "vision-stream" events as output arrives.
 /// Frontend should listen for these events to display streaming output.
+///
+/// Looks up the vision model definition via the TaskRouter so that model_file
+/// and mmproj_file come from config (models.toml or dynamic registration)
+/// rather than being hardcoded.
 #[tauri::command]
 pub async fn vision_chat_stream(
     image_path: String,
     prompt: String,
     max_tokens: Option<String>,
     app: AppHandle,
+    router_state: State<'_, TaskRouterState>,
 ) -> Result<(), String> {
     let models_dir = get_models_dir();
     let max_tokens = max_tokens.unwrap_or_else(|| "256".to_string());
-    
-    // Vision model config (from models.toml)
-    let model_file = "LFM2.5-VL-1.6B-Q4_0.gguf";
-    let mmproj_file = "mmproj-LFM2.5-VL-1.6b-Q8_0.gguf";
-    
+
+    // Look up the vision model definition from registry / dynamic models
+    let def = router_state
+        .0
+        .get_model_def_for_task(&TaskType::VisionChat)
+        .await
+        .ok_or_else(|| "No vision model registered for task 'vision_chat'".to_string())?;
+
+    let model_file = &def.model_file;
+    let mmproj_file = def.param_or("mmproj_file", "");
+    if mmproj_file.is_empty() {
+        return Err(format!(
+            "Vision model '{}' is missing 'mmproj_file' in its params",
+            def.id
+        ));
+    }
+
     execute_vision_streaming(
         model_file,
-        mmproj_file,
+        &mmproj_file,
         &image_path,
         &prompt,
         &max_tokens,
         &models_dir,
         app,
-    ).await
+    )
+    .await
 }

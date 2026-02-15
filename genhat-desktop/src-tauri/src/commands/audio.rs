@@ -29,7 +29,7 @@ pub async fn generate_speech(
         request_id: uuid::Uuid::new_v4().to_string(),
         task_type: TaskType::Tts,
         input,
-        model_override: Some("chatterbox-tts".to_string()),
+        model_override: None, // Add the model at later point of time
         extra,
     };
 

@@ -33,3 +33,6 @@ uuid = { version = "1", features = ["v4"] }
 dashmap = "6"
 crossbeam-channel = "0.5"
 base64 = "0.22"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -177,7 +177,9 @@ pub enum ModelHandle {
 pub struct ManagedInstance {
     pub instance_id: String,
     /// Handle to the running model. None when the instance is still loading.
-    pub handle: Option<ModelHandle>,
+    /// Wrapped in Arc so the handle can be shared without holding a lock
+    /// across long-running backend calls.
+    pub handle: Option<Arc<ModelHandle>>,
     pub status: ModelStatus,
     /// If true, this instance will be killed once its current task completes.
     pub ephemeral: bool,

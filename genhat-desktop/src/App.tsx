@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -25,6 +25,15 @@ function App() {
   const [prompt, setPrompt] = useState("");
   const [response, setResponse] = useState("");
   const [loading, setLoading] = useState(false);
+  const visionUnlistenRef = useRef<(() => void) | null>(null);
+
+  // Clean up vision stream listener on unmount
+  useEffect(() => {
+    return () => {
+      visionUnlistenRef.current?.();
+      visionUnlistenRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     invoke<ModelFile[]>("list_models")
@@ -84,7 +93,7 @@ function App() {
 
     try {
       // Audio Mode
-      if (chatMode === "audio" && selectedAudioModel && selectedAudioModel !== "None") {
+      if (chatMode === "audio" && selectedAudioModel) {
          try {
            const path = await invoke<string>("generate_speech", {
              modelPath: selectedAudioModel,
@@ -108,15 +117,21 @@ function App() {
         }
         
         try {
+          // Clean up any previous listener before registering a new one
+          visionUnlistenRef.current?.();
+          visionUnlistenRef.current = null;
+
           // Listen for streaming events from the backend
           const unlisten = await listen<{ chunk: string; done: boolean }>("vision-stream", (event) => {
             if (event.payload.done) {
               setLoading(false);
-              unlisten();
+              visionUnlistenRef.current?.();
+              visionUnlistenRef.current = null;
             } else if (event.payload.chunk) {
               setResponse(prev => prev + event.payload.chunk);
             }
           });
+          visionUnlistenRef.current = unlisten;
 
           // Start the streaming vision chat
           await invoke("vision_chat_stream", {
@@ -127,6 +142,13 @@ function App() {
           console.error(e);
           setResponse(`Error: ${e}`);
           setLoading(false);
+        } finally {
+          // Always clean up listener if the backend didn't emit a done event
+          // (e.g. invoke threw, process crashed, or exited without done)
+          if (visionUnlistenRef.current) {
+            visionUnlistenRef.current();
+            visionUnlistenRef.current = null;
+          }
         }
         return;
       }
@@ -349,8 +371,7 @@ function App() {
             <audio controls src={audioOutput} autoPlay style={{ width: '100%' }} />
           </div>
         )}
-        <pre style={{ whiteSpace: "pre-wrap", background: '#000', padding: 10, borderRadius: 4, minHeight: 50 }}>
-          {response}
+          <pre style={{ whiteSpace: "pre-wrap", background: '#000', color: '#fff', padding: 10, borderRadius: 4, minHeight: 50 }}>          {response}
         </pre>
       </div>
     </div>
