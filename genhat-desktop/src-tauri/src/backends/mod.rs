@@ -7,6 +7,7 @@
 pub mod llama_server;
 pub mod llama_cli;
 pub mod whisper_cpp;
+pub mod tts_inference;
 
 use crate::registry::types::{ModelDef, ModelHandle, TaskRequest, TaskResponse};
 use async_trait::async_trait;
@@ -50,5 +51,6 @@ pub fn create_backend(def: &ModelDef) -> Box<dyn ModelBackend> {
         BackendKind::LlamaServer => Box::new(llama_server::LlamaServerBackend::new()),
         BackendKind::LlamaCli => Box::new(llama_cli::LlamaCliBackend::new()),
         BackendKind::WhisperCpp => Box::new(whisper_cpp::WhisperCppBackend::new()),
+        BackendKind::TtsInference => Box::new(tts_inference::TtsInferenceBackend::new()),
     }
 }
