@@ -1,25 +1,25 @@
 import { useState, useEffect } from "react";
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-
-interface ModelFile {
-  name: string;
-  path: string;
-}
+import { invoke } from "@tauri-apps/api/core";
+import { Api } from "./api";
+import type { ChatMessage, ModelFile } from "./types";
+import Sidebar from "./components/Sidebar";
+import ChatWindow from "./components/ChatWindow";
+import "./App.css";
 
 function App() {
   const [models, setModels] = useState<ModelFile[]>([]);
-  const [selectedModel, setSelectedModel] = useState("");
+  const [selectedModel, setSelectedModel] = useState<string>("");
   
   const [audioModels, setAudioModels] = useState<ModelFile[]>([]);
-  const [selectedAudioModel, setSelectedAudioModel] = useState("None");
-  const [audioOutput, setAudioOutput] = useState("");
+  const [selectedAudioModel, setSelectedAudioModel] = useState<string>("None");
+  const [audioOutput, setAudioOutput] = useState<string>("");
 
-  const [prompt, setPrompt] = useState("");
-  const [response, setResponse] = useState("");
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [streamingContent, setStreamingContent] = useState<string>("");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    invoke<ModelFile[]>("list_models")
+    Api.listModels()
       .then((list) => {
         setModels(list);
         if (list.length > 0) {
@@ -28,7 +28,7 @@ function App() {
       })
       .catch(console.error);
 
-    invoke<ModelFile[]>("list_audio_models")
+    Api.listAudioModels()
       .then((list) => {
         setAudioModels(list);
       })
@@ -38,164 +38,105 @@ function App() {
   const handleModelChange = async (path: string) => {
     try {
       setSelectedModel(path);
-      await invoke("switch_model", { modelPath: path });
-      setResponse(""); 
-      alert(`Switched to model: ${path}`);
+      await Api.switchModel(path);
+      setMessages([]); // Clear chat on model switch
+      alert(`Switched to model: ${path.split("/").pop()}`);
     } catch (err) {
       console.error(err);
       alert("Failed to switch model");
     }
   };
 
-  const sendPrompt = async () => {
-    setResponse("");
-    setAudioOutput("");
+  const handleSend = async (text: string) => {
+    const newMsg: ChatMessage = { role: "user", content: text };
+    setMessages((prev) => [...prev, newMsg]);
     setLoading(true);
+    setStreamingContent("");
+    setAudioOutput("");
 
-    try {
-      // Audio Mode Check
-      if (selectedAudioModel && selectedAudioModel !== "None") {
-         try {
-           const path = await invoke<string>("generate_speech", {
-             modelPath: selectedAudioModel,
-             input: prompt,
-           });
-           setAudioOutput(convertFileSrc(path));
-         } catch (e) {
-           console.error(e);
-           setResponse(`Error generating audio: ${e}`);
-         }
-         setLoading(false);
-         return;
-      }
-
-      // Normal LLM Mode
-      const res = await fetch("http://127.0.0.1:8081/v1/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [
-            { role: "user", content: prompt }
-          ],
-          // These parameters are optional if defaults are set in the server,
-          // but we can override or ensure them here.
-          max_tokens: 256,
-          stream: true,
-        }),
-      });
-
-      if (!res.body) throw new Error("No response body");
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-
-      let buffer = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data:")) continue;
-
-          const payload = line.replace("data:", "").trim();
-          if (payload === "[DONE]") {
-            setLoading(false);
-            return;
+    // If Audio Mode is enabled
+    if (selectedAudioModel && selectedAudioModel !== "None") {
+      try {
+        // For audio, we just generate speech from the prompt directly (demo mode)
+        // Ideally we would get the LLM response first, then TTS that.
+        // But following existing logic: user prompt -> audio.
+        // Wait, the original code did `input: prompt`.
+        
+        // Let's improve: LLM -> TTS
+        // 1. Get LLM response
+        let fullResponse = "";
+        await Api.streamChat(
+          [...messages, newMsg],
+          (chunk) => {
+            setStreamingContent((prev) => prev + chunk);
+            fullResponse += chunk;
+          },
+          async () => {
+             // 2. Generate Audio from LLM response
+             try {
+                const audioPath = await Api.generateSpeech(selectedAudioModel, fullResponse);
+                setAudioOutput(audioPath);
+             } catch (e) {
+                console.error("TTS Error:", e);
+             }
+             setLoading(false);
+             setMessages(prev => [...prev, { role: "assistant", content: fullResponse }]);
+             setStreamingContent("");
+          },
+          (err) => {
+             console.error(err);
+             setLoading(false);
           }
+        );
 
-          try {
-            const json = JSON.parse(payload);
-            
-            const delta = json.choices?.[0]?.delta;
-            if (delta && delta.content) {
-              setResponse(prev => prev + delta.content);
-            }
-          } catch {
-            // ignore parse errors
-          }
-        }
+      } catch (e) {
+        console.error(e);
+        setLoading(false);
       }
-      setLoading(false);
-    } catch (err) {
-      console.error(err);
-      setResponse("Streaming error");
-      setLoading(false);
+      return;
     }
+
+    // Normal Text Chat
+    let fullResponse = "";
+    Api.streamChat(
+      [...messages, newMsg],
+      (chunk) => {
+        setStreamingContent((prev) => prev + chunk);
+        fullResponse += chunk;
+      },
+      () => {
+        setLoading(false);
+        if (fullResponse) {
+          setMessages((prev) => [...prev, { role: "assistant", content: fullResponse }]);
+          setStreamingContent("");
+        }
+      },
+      (err) => {
+        console.error("Stream error", err);
+        setLoading(false);
+      }
+    );
   };
 
-
   return (
-    <div style={{ padding: 20 }}>
-      <h1>GenHat Local Intelligence</h1>
-
-      <div style={{ display: 'flex', gap: '20px', marginBottom: 20 }}>
-        <div>
-          <label htmlFor="model-select" style={{ display: 'block', marginBottom: '5px' }}>LLM Model:</label>
-          <select
-            id="model-select"
-            value={selectedModel}
-            onChange={(e) => handleModelChange(e.target.value)}
-            disabled={loading || models.length === 0}
-            style={{ width: '200px' }}
-          >
-            {models.map((m) => (
-              <option key={m.path} value={m.path}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div>
-          <label htmlFor="audio-select" style={{ display: 'block', marginBottom: '5px' }}>Audio Model:</label>
-          <select
-            id="audio-select"
-            value={selectedAudioModel}
-            onChange={(e) => setSelectedAudioModel(e.target.value)}
-            disabled={loading}
-            style={{ width: '200px' }}
-          >
-            <option value="None">None (Text Chat)</option>
-            {audioModels.map((m) => (
-              <option key={m.path} value={m.path}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      <textarea
-        rows={4}
-        style={{ width: '100%', marginBottom: '10px' }}
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-        placeholder={selectedAudioModel && selectedAudioModel !== "None" ? "Type text to generate speech..." : "Type your prompt for the LLM..."}
+    <div className="app-container">
+      <Sidebar
+        models={models}
+        selectedModel={selectedModel}
+        onModelSelect={handleModelChange}
+        audioModels={audioModels}
+        selectedAudio={selectedAudioModel}
+        onAudioSelect={setSelectedAudioModel}
       />
-
-      <br />
-
-      <button onClick={sendPrompt} disabled={loading} style={{ padding: '8px 16px', cursor: 'pointer' }}>
-        {loading ? "Processing..." : (selectedAudioModel && selectedAudioModel !== "None" ? "Generate Audio" : "Send to LLM")}
-      </button>
-
-      <div style={{ marginTop: 20 }}>
-        {audioOutput && (
-          <div style={{ marginBottom: 20, padding: 10, border: '1px solid #ccc', borderRadius: 4 }}>
-            <p><strong>Generated Audio:</strong></p>
-            <audio controls src={audioOutput} autoPlay style={{ width: '100%' }} />
-          </div>
-        )}
-        <pre style={{ whiteSpace: "pre-wrap", background: '#f5f5f5', padding: 10, borderRadius: 4, minHeight: 50 }}>
-          {response}
-        </pre>
-      </div>
+      <main className="main-content">
+        <ChatWindow 
+           messages={messages}
+           streamingContent={streamingContent}
+           isLoading={loading}
+           onSend={handleSend}
+           audioSrc={audioOutput}
+        />
+      </main>
     </div>
   );
 }
