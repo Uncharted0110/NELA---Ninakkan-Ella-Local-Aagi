@@ -82,6 +82,7 @@ fn parse_backend(s: &str) -> Result<BackendKind, String> {
         "llama_cli" => Ok(BackendKind::LlamaCli),
         "whisper_cpp" => Ok(BackendKind::WhisperCpp),
         "tts_inference" => Ok(BackendKind::TtsInference),
+        "onnx_classifier" => Ok(BackendKind::OnnxClassifier),
         other => Err(format!("Unknown backend: {other}")),
     }
 }

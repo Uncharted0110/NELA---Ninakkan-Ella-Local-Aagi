@@ -263,6 +263,11 @@ impl ModelBackend for LlamaServerBackend {
             return self.execute_embedding(port, request).await;
         }
 
+        // ── Classification requests get a short completion and parse the label ──
+        if request.task_type == crate::registry::types::TaskType::Classify {
+            return self.execute_classification(port, request).await;
+        }
+
         let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
 
         // Build the chat messages. The task type determines the system prompt.
@@ -388,6 +393,72 @@ impl ModelBackend for LlamaServerBackend {
 
 // ── Embedding helper (outside the trait impl to keep it clean) ──
 impl LlamaServerBackend {
+    /// Classify a query using a DistilBERT-based router model.
+    /// The model outputs a classification label as short text.
+    async fn execute_classification(
+        &self,
+        port: u16,
+        request: &TaskRequest,
+    ) -> Result<TaskResponse, String> {
+        let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+
+        let body = serde_json::json!({
+            "model": "local",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a query classifier. Classify the user's query into exactly one of these categories: no_retrieval, simple_rag, multi_doc, summarization. Respond with only the category name."
+                },
+                {
+                    "role": "user",
+                    "content": &request.input
+                }
+            ],
+            "stream": false,
+            "temperature": 0.0,
+            "max_tokens": 16
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Classification request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Classification endpoint returned {status}: {text}"));
+        }
+
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse classification response: {e}"))?;
+
+        let content = json["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("simple_rag")
+            .trim()
+            .to_lowercase();
+
+        // Parse the label and map to a confidence score
+        let (label, confidence) = match content.as_str() {
+            l if l.contains("no_retrieval") => ("no_retrieval".to_string(), 0.9),
+            l if l.contains("simple_rag") => ("simple_rag".to_string(), 0.9),
+            l if l.contains("multi_doc") => ("multi_doc".to_string(), 0.9),
+            l if l.contains("summarization") => ("summarization".to_string(), 0.9),
+            _ => ("simple_rag".to_string(), 0.5), // Default fallback
+        };
+
+        Ok(TaskResponse::Classification {
+            label,
+            confidence: confidence as f32,
+        })
+    }
+
     /// Call the /v1/embeddings endpoint on a llama-server running in --embedding mode.
     async fn execute_embedding(
         &self,

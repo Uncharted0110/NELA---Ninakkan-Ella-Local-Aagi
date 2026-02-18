@@ -99,7 +99,7 @@ pub struct RaptorTreeStatus {
 impl RagDb {
     /// Create RAPTOR-specific tables if they don't exist.
     pub fn create_raptor_tables(&self) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS raptor_nodes (
@@ -133,7 +133,7 @@ impl RagDb {
         child_ids: &[i64],
         embedding: Option<&[f32]>,
     ) -> Result<i64, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let child_ids_json = serde_json::to_string(child_ids).unwrap_or_default();
         let embedding_bytes = embedding.map(embedding_to_bytes);
 
@@ -157,7 +157,7 @@ impl RagDb {
 
     /// Get all RAPTOR nodes for a document.
     pub fn get_raptor_nodes(&self, doc_id: i64) -> Result<Vec<RaptorNode>, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, doc_id, level, parent_id, summary_text, confidence_score, child_ids
@@ -166,7 +166,7 @@ impl RagDb {
             .map_err(|e| format!("Query error: {e}"))?;
 
         let nodes = stmt
-            .query_map(rusqlite::params![doc_id], |row| {
+            .query_map(rusqlite::params![doc_id], |row: &rusqlite::Row| {
                 let child_ids_json: String = row.get(6)?;
                 let child_ids: Vec<i64> = serde_json::from_str(&child_ids_json).unwrap_or_default();
                 Ok(RaptorNode {
@@ -180,7 +180,7 @@ impl RagDb {
                 })
             })
             .map_err(|e| format!("Query error: {e}"))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r: Result<RaptorNode, _>| r.ok())
             .collect();
 
         Ok(nodes)
@@ -188,12 +188,12 @@ impl RagDb {
 
     /// Get a specific RAPTOR node by ID.
     pub fn get_raptor_node(&self, node_id: i64) -> Result<RaptorNode, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.query_row(
             "SELECT id, doc_id, level, parent_id, summary_text, confidence_score, child_ids
              FROM raptor_nodes WHERE id = ?1",
             rusqlite::params![node_id],
-            |row| {
+            |row: &rusqlite::Row| {
                 let child_ids_json: String = row.get(6)?;
                 let child_ids: Vec<i64> = serde_json::from_str(&child_ids_json).unwrap_or_default();
                 Ok(RaptorNode {
@@ -212,7 +212,7 @@ impl RagDb {
 
     /// Delete all RAPTOR nodes for a document.
     pub fn delete_raptor_nodes(&self, doc_id: i64) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "DELETE FROM raptor_nodes WHERE doc_id = ?1",
             rusqlite::params![doc_id],
@@ -223,12 +223,12 @@ impl RagDb {
 
     /// Check if a document has RAPTOR nodes.
     pub fn has_raptor_tree(&self, doc_id: i64) -> Result<bool, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM raptor_nodes WHERE doc_id = ?1",
                 rusqlite::params![doc_id],
-                |row| row.get(0),
+                |row: &rusqlite::Row| row.get(0),
             )
             .map_err(|e| format!("Query error: {e}"))?;
         Ok(count > 0)
@@ -236,7 +236,7 @@ impl RagDb {
 
     /// Get embeddings for RAPTOR nodes (for vector search).
     pub fn get_raptor_embeddings(&self, doc_id: i64) -> Result<Vec<(i64, Vec<f32>)>, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, embedding FROM raptor_nodes WHERE doc_id = ?1 AND embedding IS NOT NULL",
@@ -244,13 +244,13 @@ impl RagDb {
             .map_err(|e| format!("Query error: {e}"))?;
 
         let embeddings = stmt
-            .query_map(rusqlite::params![doc_id], |row| {
+            .query_map(rusqlite::params![doc_id], |row: &rusqlite::Row| {
                 let id: i64 = row.get(0)?;
                 let blob: Vec<u8> = row.get(1)?;
                 Ok((id, bytes_to_embedding(&blob)))
             })
             .map_err(|e| format!("Query error: {e}"))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r: Result<(i64, Vec<f32>), _>| r.ok())
             .collect();
 
         Ok(embeddings)
@@ -389,16 +389,7 @@ pub async fn build_raptor_tree(
     let chunks = db.get_chunks_by_ids(&chunk_ids)?;
 
     // Collect embeddings (prefer enriched, fallback to raw)
-    let mut chunk_embeddings: Vec<(i64, Vec<f32>)> = Vec::new();
-    for chunk_id in &chunk_ids {
-        if let Ok(emb_blob) = db.conn.lock().unwrap().query_row(
-            "SELECT COALESCE(enriched_embedding, embedding) FROM chunks WHERE id = ?1",
-            rusqlite::params![chunk_id],
-            |row| row.get::<_, Vec<u8>>(0),
-        ) {
-            chunk_embeddings.push((*chunk_id, bytes_to_embedding(&emb_blob)));
-        }
-    }
+    let chunk_embeddings = db.get_chunk_embeddings_for_doc(doc_id)?;
 
     if chunk_embeddings.is_empty() {
         return Err("No embeddings found for document chunks. Run Phase 1 ingestion first.".into());

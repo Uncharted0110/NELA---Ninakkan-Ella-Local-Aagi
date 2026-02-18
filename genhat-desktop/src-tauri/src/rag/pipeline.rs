@@ -14,12 +14,14 @@ use crate::rag::db::RagDb;
 use crate::rag::fusion::{rrf_fuse, FusedResult};
 use crate::rag::parsers;
 use crate::rag::search::BM25Index;
+use crate::rag::vecindex::VectorIndex;
 use crate::registry::types::TaskResponse;
 use crate::router::tasks;
 use crate::router::TaskRouter;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
+use tauri::Emitter;
 use tokio::sync::Mutex as TokioMutex;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -59,6 +61,7 @@ pub struct IngestionStatus {
 pub struct RagPipeline {
     pub db: Arc<RagDb>,
     pub bm25: Arc<BM25Index>,
+    pub vec_index: Arc<VectorIndex>,
     router: Arc<TaskRouter>,
     /// Lock to serialize ingestion (prevent concurrent writes to tantivy writer).
     ingest_lock: TokioMutex<()>,
@@ -79,9 +82,14 @@ impl RagPipeline {
         let db = Arc::new(RagDb::open(&db_path)?);
         let bm25 = Arc::new(BM25Index::open(&index_dir)?);
 
+        // Load all embeddings into in-memory IVF vector index
+        let vec_index = Arc::new(VectorIndex::load_from_db(&db)?);
+        log::info!("VectorIndex loaded: {} vectors in memory", vec_index.len());
+
         Ok(Self {
             db,
             bm25,
+            vec_index,
             router,
             ingest_lock: TokioMutex::new(()),
         })
@@ -106,13 +114,46 @@ impl RagPipeline {
         }
 
         // 1. Parse document
-        let parsed = parsers::parse_document(file_path)?;
+        let mut parsed = parsers::parse_document(file_path)?;
         let title = parsed.title.clone();
         let doc_type = file_path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("unknown")
             .to_lowercase();
+
+        // 1b. If audio file with pending transcription, run Whisper STT
+        let has_pending_audio = parsed.sections.iter().any(|s| s.metadata == "audio:pending");
+        if has_pending_audio {
+            log::info!("Audio file detected, attempting transcription: {}", path_str);
+            let transcribe_req = tasks::transcribe_request(&path_str);
+            match self.router.route(&transcribe_req).await {
+                Ok(TaskResponse::Transcription { segments }) => {
+                    log::info!("Transcribed {} segments from audio", segments.len());
+                    let segment_tuples: Vec<(String, u64, u64)> = segments
+                        .iter()
+                        .map(|s| (s.text.clone(), s.start_ms, s.end_ms))
+                        .collect();
+                    parsed = crate::rag::parsers::audio::from_transcription(
+                        &title,
+                        &segment_tuples,
+                    );
+                }
+                Ok(TaskResponse::Text(text)) => {
+                    log::info!("Got text transcription for audio");
+                    parsed = crate::rag::parsers::audio::from_transcription(
+                        &title,
+                        &[(text, 0, 0)],
+                    );
+                }
+                Ok(_) => {
+                    log::warn!("Transcription returned unexpected response type, keeping placeholder");
+                }
+                Err(e) => {
+                    log::warn!("Audio transcription failed: {e}. Ingesting with placeholder text.");
+                }
+            }
+        }
 
         // 2. Chunk the sections
         let mut all_chunks: Vec<Chunk> = Vec::new();
@@ -188,6 +229,8 @@ impl RagPipeline {
                         if let Ok(()) =
                             self.db.set_chunk_embedding(chunk_ids[i], embedding, None)
                         {
+                            // Also add to in-memory vector index
+                            self.vec_index.insert(chunk_ids[i], embedding.clone());
                             count += 1;
                         }
                     }
@@ -241,6 +284,10 @@ impl RagPipeline {
                         log::warn!("Failed to store enrichment for chunk {}: {e}", chunk.id);
                     } else {
                         enriched += 1;
+                        // Update in-memory vector index with enriched embedding
+                        if let Some(ref emb) = enriched_emb {
+                            self.vec_index.insert(chunk.id, emb.clone());
+                        }
                     }
                 }
                 Ok(_) => {
@@ -257,22 +304,48 @@ impl RagPipeline {
     }
 
     /// Spawn a background enrichment worker that processes chunks gradually.
-    pub fn start_enrichment_worker(pipeline: Arc<Self>) {
+    /// Emits `rag:enrichment_progress` events to the frontend.
+    /// When enrichment is complete, automatically builds RAPTOR trees for
+    /// fully-enriched documents (lazy RAPTOR) and rebuilds the vector index.
+    pub fn start_enrichment_worker(pipeline: Arc<Self>, app_handle: tauri::AppHandle) {
         tauri::async_runtime::spawn(async move {
             log::info!("RAG enrichment worker started");
+            let mut idle_cycles: u32 = 0;
             loop {
                 match pipeline.enrich_pending(5).await {
                     Ok(0) => {
+                        idle_cycles += 1;
+
+                        // After 2 idle cycles (~60s), try building RAPTOR trees
+                        if idle_cycles == 2 {
+                            pipeline.auto_build_raptor_trees(&app_handle).await;
+                        }
+
+                        // Periodically rebuild vector index partitions during idle time
+                        pipeline.vec_index.rebuild_if_needed();
+
                         // Nothing to enrich — wait longer
                         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                     }
                     Ok(n) => {
+                        idle_cycles = 0;
                         log::info!("Enriched {n} chunks, continuing...");
+                        // Emit progress event to frontend
+                        let _ = app_handle.emit("rag:enrichment_progress", serde_json::json!({
+                            "enriched_this_round": n,
+                            "status": "in_progress"
+                        }));
                         // Small delay to avoid hogging the model
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     }
                     Err(e) => {
+                        idle_cycles = 0;
                         log::warn!("Enrichment error: {e}");
+                        let _ = app_handle.emit("rag:enrichment_progress", serde_json::json!({
+                            "enriched_this_round": 0,
+                            "status": "error",
+                            "error": e.to_string()
+                        }));
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     }
                 }
@@ -286,6 +359,24 @@ impl RagPipeline {
 
     /// Full RAG query: classify → HyDE → hybrid search → RRF → context build → generate.
     pub async fn query(&self, user_query: &str, top_k: usize) -> Result<RagResult, String> {
+        // 0. Classify the query to decide retrieval strategy
+        let query_class = self.classify_query(user_query).await;
+        log::info!("Query classified as: {}", query_class);
+
+        // Skip retrieval entirely for general knowledge questions
+        if query_class == "no_retrieval" {
+            let chat_request = tasks::chat_request(user_query);
+            let answer = match self.router.route(&chat_request).await {
+                Ok(TaskResponse::Text(text)) => text,
+                Ok(_) => "Failed to generate answer: unexpected response type".to_string(),
+                Err(e) => format!("Failed to generate answer: {e}"),
+            };
+            return Ok(RagResult {
+                answer,
+                sources: vec![],
+            });
+        }
+
         // 1. Optional HyDE: generate a hypothetical answer to improve retrieval
         let search_query = match self.try_hyde(user_query).await {
             Some(hyde_text) => hyde_text,
@@ -348,11 +439,73 @@ impl RagPipeline {
 
         let sources: Vec<SourceChunk> = graded_sources.into_iter().map(|(s, _)| s).collect();
 
+        // RAG Fusion: if all chunks failed grading, rephrase and retry once
         if sources.is_empty() {
+            log::info!("All chunks failed grading — attempting RAG Fusion rephrase");
+            let rephrased = self.generate_rephrasings(user_query).await;
+
+            let mut retry_sources = Vec::new();
+            for variant in &rephrased {
+                let bm25_r = self.bm25.search(variant, top_k).unwrap_or_default();
+                let vec_r = self.vector_search(variant, top_k).await.unwrap_or_default();
+                let fused_r = rrf_fuse(&[bm25_r, vec_r]);
+
+                let ids: Vec<i64> = fused_r.iter().take(top_k).map(|r| r.chunk_id).collect();
+                if let Ok(chunks) = self.db.get_chunks_by_ids(&ids) {
+                    for (fused_result, chunk) in fused_r.iter().zip(chunks.iter()) {
+                        let doc_title = self
+                            .db
+                            .doc_title_for_chunk(chunk.id)
+                            .unwrap_or_else(|_| "Unknown".to_string());
+                        retry_sources.push(SourceChunk {
+                            chunk_id: chunk.id,
+                            doc_title,
+                            text: chunk.text.clone(),
+                            score: fused_result.rrf_score,
+                        });
+                    }
+                }
+            }
+
+            // Deduplicate by chunk_id, keep highest score
+            retry_sources.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            retry_sources.dedup_by_key(|s| s.chunk_id);
+            retry_sources.truncate(top_k);
+
+            if retry_sources.is_empty() {
+                return Ok(RagResult {
+                    answer: "Retrieved documents were not relevant to your question. Try rephrasing or ingesting more documents."
+                        .to_string(),
+                    sources: vec![],
+                });
+            }
+
+            // Use retry_sources for answer generation
+            let context = retry_sources
+                .iter()
+                .enumerate()
+                .map(|(i, s)| format!("[Source {} — {}]\n{}", i + 1, s.doc_title, s.text))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+
+            let augmented_prompt = format!(
+                "Use the following context to answer the question. \
+                 Cite sources using [Source N] when referencing specific information.\n\n\
+                 Context:\n{context}\n\n\
+                 Question: {user_query}\n\n\
+                 Answer:"
+            );
+
+            let chat_request = tasks::chat_request(&augmented_prompt);
+            let answer = match self.router.route(&chat_request).await {
+                Ok(TaskResponse::Text(text)) => text,
+                Ok(_) => "Failed to generate answer: unexpected response type".to_string(),
+                Err(e) => format!("Failed to generate answer: {e}"),
+            };
+
             return Ok(RagResult {
-                answer: "Retrieved documents were not relevant to your question. Try rephrasing or ingesting more documents."
-                    .to_string(),
-                sources: vec![],
+                answer,
+                sources: retry_sources,
             });
         }
 
@@ -438,6 +591,81 @@ impl RagPipeline {
         }
     }
 
+    /// Classify a query to determine the retrieval strategy.
+    /// Returns: "no_retrieval", "simple_rag", "multi_doc", or "summarization".
+    /// Falls back to "simple_rag" if the classifier is unavailable.
+    async fn classify_query(&self, query: &str) -> String {
+        let request = tasks::classify_request(query);
+        match self.router.route(&request).await {
+            Ok(TaskResponse::Classification { label, confidence }) => {
+                log::debug!("Query classified as '{}' (confidence: {:.2})", label, confidence);
+                if confidence < 0.5 {
+                    "simple_rag".to_string()
+                } else {
+                    label
+                }
+            }
+            Ok(TaskResponse::Text(text)) => {
+                // Fallback: parse text response as label
+                let lower = text.trim().to_lowercase();
+                if lower.contains("no_retrieval") {
+                    "no_retrieval".to_string()
+                } else if lower.contains("multi_doc") {
+                    "multi_doc".to_string()
+                } else if lower.contains("summarization") {
+                    "summarization".to_string()
+                } else {
+                    "simple_rag".to_string()
+                }
+            }
+            Ok(_) => {
+                log::warn!("Query classification returned unexpected response type");
+                "simple_rag".to_string()
+            }
+            Err(e) => {
+                log::warn!("Query classification failed: {e}");
+                "simple_rag".to_string()
+            }
+        }
+    }
+
+    /// Generate 3 query variations for RAG Fusion retry.
+    async fn generate_rephrasings(&self, query: &str) -> Vec<String> {
+        let prompt = format!(
+            "Generate exactly 3 different rephrasings of this search query. \
+             Each rephrasing should approach the topic from a different angle. \
+             Output each on a new line, numbered 1-3.\n\n\
+             Original query: {query}\n\n\
+             Rephrasings:"
+        );
+
+        let request = tasks::chat_request(&prompt);
+        match self.router.route(&request).await {
+            Ok(TaskResponse::Text(text)) => {
+                text.lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| {
+                        // Strip leading numbers like "1.", "1)", "1:"
+                        let trimmed = l.trim();
+                        if trimmed.len() > 2 && trimmed.as_bytes()[0].is_ascii_digit() {
+                            let skip = trimmed
+                                .find(|c: char| c.is_alphabetic())
+                                .unwrap_or(0);
+                            trimmed[skip..].trim().to_string()
+                        } else {
+                            trimmed.to_string()
+                        }
+                    })
+                    .take(3)
+                    .collect()
+            }
+            _ => {
+                log::debug!("Query rephrasing unavailable");
+                vec![query.to_string()] // Fallback: just retry with original
+            }
+        }
+    }
+
     /// Grade a chunk's relevance to the query (1-5 scale).
     /// Returns 3 as default if grading model is unavailable.
     async fn grade_chunk(&self, query: &str, chunk_text: &str) -> u8 {
@@ -460,7 +688,7 @@ impl RagPipeline {
         }
     }
 
-    /// Vector similarity search using the embedding model.
+    /// Vector similarity search using the in-memory VectorIndex (IVF-accelerated).
     async fn vector_search(
         &self,
         query: &str,
@@ -471,7 +699,7 @@ impl RagPipeline {
         match self.router.route(&request).await {
             Ok(TaskResponse::Embeddings(vecs)) => {
                 if let Some(query_vec) = vecs.into_iter().next() {
-                    self.db.vector_search(&query_vec, top_k, false)
+                    Ok(self.vec_index.search(&query_vec, top_k))
                 } else {
                     Ok(vec![])
                 }
@@ -504,6 +732,10 @@ impl RagPipeline {
         // Remove from BM25
         if !chunk_ids.is_empty() {
             self.bm25.delete_chunks(&chunk_ids)?;
+            // Remove from in-memory vector index
+            for &id in &chunk_ids {
+                self.vec_index.remove(id);
+            }
         }
 
         // Remove from DB
@@ -681,5 +913,69 @@ impl RagPipeline {
         };
 
         Ok(RagResult { answer, sources })
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Lazy RAPTOR — Automatic Tree Building During Idle Time
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Automatically build RAPTOR trees for fully-enriched documents
+    /// that don't have one yet. Called during enrichment worker idle cycles.
+    async fn auto_build_raptor_trees(&self, app_handle: &tauri::AppHandle) {
+        let docs = match self.db.list_documents() {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("Lazy RAPTOR: failed to list documents: {e}");
+                return;
+            }
+        };
+
+        for doc in docs {
+            // Only auto-build for fully enriched docs without a RAPTOR tree
+            if doc.enriched_count >= doc.chunk_count && doc.chunk_count > 0 {
+                if let Ok(false) = self.has_raptor_tree(doc.id) {
+                    log::info!(
+                        "Lazy RAPTOR: building tree for doc {} ({})",
+                        doc.id,
+                        doc.title
+                    );
+                    let _ = app_handle.emit(
+                        "rag:enrichment_progress",
+                        serde_json::json!({
+                            "enriched_this_round": 0,
+                            "status": "building_raptor",
+                            "doc_title": &doc.title
+                        }),
+                    );
+
+                    match self.build_raptor_tree(doc.id).await {
+                        Ok(status) => {
+                            log::info!(
+                                "Lazy RAPTOR: tree built for doc {} — {} nodes, {} levels",
+                                doc.id,
+                                status.nodes_created,
+                                status.levels
+                            );
+                            let _ = app_handle.emit(
+                                "rag:enrichment_progress",
+                                serde_json::json!({
+                                    "enriched_this_round": 0,
+                                    "status": "raptor_complete",
+                                    "doc_id": doc.id,
+                                    "nodes_created": status.nodes_created
+                                }),
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "Lazy RAPTOR: failed for doc {} ({}): {e}",
+                                doc.id,
+                                doc.title
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

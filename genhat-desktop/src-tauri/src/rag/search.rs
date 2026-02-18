@@ -22,6 +22,7 @@ pub struct BM25Index {
     // Field handles
     f_chunk_id: Field,
     f_text: Field,
+    f_text_raw: Field,
     f_title: Field,
 }
 
@@ -44,15 +45,26 @@ impl BM25Index {
                 )
                 .set_stored(),
         );
+        let f_text_raw = builder.add_text_field("text_raw", STRING | STORED);
         let f_title = builder.add_text_field("title", TEXT | STORED);
         let schema = builder.build();
 
-        // Open or create index
-        let mmap_dir = tantivy::directory::MmapDirectory::open(index_dir)
-            .map_err(|e| format!("MmapDirectory error: {e}"))?;
-
-        let index = Index::open_or_create(mmap_dir, schema.clone())
-            .map_err(|e| format!("Index open error: {e}"))?;
+        // Open or create index — if schema changed, wipe and recreate
+        let index = match Self::try_open_index(index_dir, schema.clone()) {
+            Ok(idx) => idx,
+            Err(_) => {
+                log::warn!(
+                    "BM25 index schema mismatch — deleting old index at {}",
+                    index_dir.display()
+                );
+                // Remove old index files and recreate
+                let _ = std::fs::remove_dir_all(index_dir);
+                std::fs::create_dir_all(index_dir)
+                    .map_err(|e| format!("Failed to recreate index dir: {e}"))?;
+                Self::try_open_index(index_dir, schema.clone())
+                    .map_err(|e| format!("Index recreate failed: {e}"))?
+            }
+        };
 
         // Register the en_stem tokenizer (tantivy includes it by default)
         let reader = index
@@ -73,8 +85,17 @@ impl BM25Index {
             _schema: schema,
             f_chunk_id,
             f_text,
+            f_text_raw,
             f_title,
         })
+    }
+
+    /// Attempt to open or create a tantivy index with the given schema.
+    fn try_open_index(index_dir: &Path, schema: Schema) -> Result<Index, String> {
+        let mmap_dir = tantivy::directory::MmapDirectory::open(index_dir)
+            .map_err(|e| format!("MmapDirectory error: {e}"))?;
+        Index::open_or_create(mmap_dir, schema)
+            .map_err(|e| format!("Index open error: {e}"))
     }
 
     /// Index a single chunk.
@@ -84,6 +105,7 @@ impl BM25Index {
             .add_document(doc!(
                 self.f_chunk_id => chunk_id,
                 self.f_text => text,
+                self.f_text_raw => text,
                 self.f_title => doc_title,
             ))
             .map_err(|e| format!("Add doc error: {e}"))?;
@@ -102,6 +124,7 @@ impl BM25Index {
                     .add_document(doc!(
                         self.f_chunk_id => *id,
                         self.f_text => text.as_str(),
+                        self.f_text_raw => text.as_str(),
                         self.f_title => title.as_str(),
                     ))
                     .map_err(|e| format!("Add doc error: {e}"))?;
@@ -136,7 +159,7 @@ impl BM25Index {
     /// BM25 search. Returns (chunk_id, score) pairs sorted by relevance.
     pub fn search(&self, query_str: &str, top_k: usize) -> Result<Vec<(i64, f32)>, String> {
         let searcher = self.reader.searcher();
-        let query_parser = QueryParser::for_index(&self.index, vec![self.f_text, self.f_title]);
+        let query_parser = QueryParser::for_index(&self.index, vec![self.f_text, self.f_text_raw, self.f_title]);
 
         let query = query_parser
             .parse_query(query_str)

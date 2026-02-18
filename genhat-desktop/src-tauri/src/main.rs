@@ -77,8 +77,8 @@ fn main() {
                     .expect("Failed to initialize RAG pipeline"),
             );
 
-            // Start background enrichment worker
-            RagPipeline::start_enrichment_worker(rag_pipeline.clone());
+            // Start background enrichment worker (with app handle for event emission)
+            RagPipeline::start_enrichment_worker(rag_pipeline.clone(), app.handle().clone());
 
             // 8. Register state for Tauri commands
             app.manage(ProcessManagerState(process_manager));

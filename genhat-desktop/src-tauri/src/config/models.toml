@@ -104,6 +104,26 @@ port = "0"
 embedding = "true"
 batch_size = "512"
 
+# ── Query Router: DistilBERT Classifier (ONNX Runtime in-process) ─────────────
+
+[[models]]
+id = "query-router"
+name = "GenHat Query Router (DistilBERT ONNX)"
+backend = "onnx_classifier"
+kind = "in_process"
+model_file = "distilBert-query-router/onnx_model/model.onnx"
+tasks = ["classify"]
+auto_start = false
+max_instances = 1
+idle_timeout_s = 300
+priority = 10
+memory_mb = 300
+
+[models.params]
+config_file = "distilBert-query-router/onnx_model/config.json"
+tokenizer_file = "distilBert-query-router/onnx_model/tokenizer.json"
+max_length = "64"
+
 # ── TTS: ChatterboxTTS (tts-inference PyInstaller binary) ────────────────────
 
 [[models]]
@@ -118,3 +138,18 @@ max_instances = 1
 idle_timeout_s = 0
 priority = 10
 memory_mb = 2000
+
+# ── STT: Whisper (whisper.cpp per-request) ────────────────────────────────────
+
+[[models]]
+id = "whisper-base"
+name = "Whisper Q4_K"
+backend = "whisper_cpp"
+kind = "child_process"
+model_file = "whisper/model_q4_k.gguf"
+tasks = ["transcribe", "stt"]
+auto_start = false
+max_instances = 1
+idle_timeout_s = 0
+priority = 10
+memory_mb = 500

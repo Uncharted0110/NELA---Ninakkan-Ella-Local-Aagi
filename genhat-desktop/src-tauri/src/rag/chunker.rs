@@ -128,9 +128,11 @@ fn get_overlap_suffix(text: &str, max_len: usize) -> &str {
     if text.len() <= max_len {
         text
     } else {
-        // Find a char boundary near the target position
         let start = text.len() - max_len;
-        let start = text.ceil_char_boundary(start);
+        // Find the next valid char boundary at or after `start`
+        let start = (start..text.len())
+            .find(|&i| text.is_char_boundary(i))
+            .unwrap_or(text.len());
         &text[start..]
     }
 }

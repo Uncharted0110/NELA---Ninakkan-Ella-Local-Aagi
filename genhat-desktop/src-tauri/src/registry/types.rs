@@ -21,6 +21,7 @@ pub enum BackendKind {
     LlamaCli,
     WhisperCpp,
     TtsInference,
+    OnnxClassifier,
 }
 
 /// Whether the model runs as a child process or in the Tauri process.

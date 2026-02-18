@@ -23,3 +23,4 @@ pub mod chunker;
 pub mod parsers;
 pub mod pipeline;
 pub mod raptor;
+pub mod vecindex;

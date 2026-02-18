@@ -1,19 +1,18 @@
-//! SQLite + sqlite-vec vector store for RAG.
+//! SQLite vector store for RAG with r2d2 connection pooling.
 //!
 //! Schema:
 //!   documents  — one row per ingested file
-//!   chunks     — one row per text chunk, with embedding stored in a vec0 table
+//!   chunks     — one row per text chunk, with embeddings stored as BLOB
 //!
-//! sqlite-vec provides KNN search via the `vec0` virtual table.
-//! We do NOT use sqlite-vec's auto_extension here because the Rust crate
-//! for sqlite-vec is pre-v1.  Instead we store embeddings as BLOB columns
-//! and do brute-force cosine search in Rust (viable for <50 docs / ~5k chunks).
-//! This avoids the sqlite-vec C extension dependency and keeps the build simple.
-//! We can swap to sqlite-vec later when the crate stabilises.
+//! Uses an r2d2 connection pool (8 connections) for parallel read access
+//! under WAL mode. Vector search is delegated to the in-memory VectorIndex
+//! (see vecindex.rs) for sub-linear ANN search; the brute-force fallback
+//! method is retained for testing.
 
-use rusqlite::{params, Connection};
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::params;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 // ── Types ──
 
@@ -41,10 +40,10 @@ pub struct ChunkRecord {
     pub confidence: Option<f64>,
 }
 
-/// Handle to the RAG database.
+/// Handle to the RAG database backed by an r2d2 connection pool.
 #[derive(Clone)]
 pub struct RagDb {
-    conn: Arc<Mutex<Connection>>,
+    pool: Pool<SqliteConnectionManager>,
     pub path: PathBuf,
 }
 
@@ -88,9 +87,29 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+// ── Connection Pool Initializer ──
+
+/// Configures each pooled SQLite connection with WAL mode and synchronous=NORMAL.
+#[derive(Debug)]
+struct WalModeCustomizer;
+
+impl r2d2::CustomizeConnection<rusqlite::Connection, rusqlite::Error> for WalModeCustomizer {
+    fn on_acquire(&self, conn: &mut rusqlite::Connection) -> Result<(), rusqlite::Error> {
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        Ok(())
+    }
+}
+
 // ── Implementation ──
 
 impl RagDb {
+    /// Get a connection from the pool.
+    pub(crate) fn conn(
+        &self,
+    ) -> Result<r2d2::PooledConnection<SqliteConnectionManager>, String> {
+        self.pool.get().map_err(|e| format!("DB pool error: {e}"))
+    }
+
     /// Open (or create) the RAG database at the given path.
     pub fn open(db_path: &Path) -> Result<Self, String> {
         // Ensure parent directory exists
@@ -99,15 +118,15 @@ impl RagDb {
                 .map_err(|e| format!("Failed to create DB directory: {e}"))?;
         }
 
-        let conn =
-            Connection::open(db_path).map_err(|e| format!("Failed to open RAG DB: {e}"))?;
-
-        // Enable WAL mode for concurrent reads during background enrichment
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
-            .map_err(|e| format!("Failed to set PRAGMA: {e}"))?;
+        let manager = SqliteConnectionManager::file(db_path);
+        let pool = Pool::builder()
+            .max_size(8) // 8 connections for parallel read access
+            .connection_customizer(Box::new(WalModeCustomizer))
+            .build(manager)
+            .map_err(|e| format!("Failed to create DB pool: {e}"))?;
 
         let db = Self {
-            conn: Arc::new(Mutex::new(conn)),
+            pool,
             path: db_path.to_path_buf(),
         };
 
@@ -117,7 +136,7 @@ impl RagDb {
     }
 
     fn create_tables(&self) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS documents (
@@ -159,7 +178,7 @@ impl RagDb {
         doc_type: &str,
         chunk_count: i64,
     ) -> Result<i64, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT OR REPLACE INTO documents (path, title, doc_type, chunk_count) VALUES (?1, ?2, ?3, ?4)",
             params![path, title, doc_type, chunk_count],
@@ -170,7 +189,7 @@ impl RagDb {
 
     /// Get all documents.
     pub fn list_documents(&self) -> Result<Vec<DocumentRecord>, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, path, title, doc_type, chunk_count, enriched_count, created_at
@@ -199,7 +218,7 @@ impl RagDb {
 
     /// Delete a document and all its chunks.
     pub fn delete_document(&self, doc_id: i64) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute("DELETE FROM chunks WHERE doc_id = ?1", params![doc_id])
             .map_err(|e| format!("Delete chunks error: {e}"))?;
         conn.execute("DELETE FROM documents WHERE id = ?1", params![doc_id])
@@ -209,7 +228,7 @@ impl RagDb {
 
     /// Check if a document (by path) is already ingested.
     pub fn document_exists(&self, path: &str) -> Result<bool, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn
             .prepare("SELECT COUNT(*) FROM documents WHERE path = ?1")
             .map_err(|e| format!("Query error: {e}"))?;
@@ -227,7 +246,7 @@ impl RagDb {
         doc_id: i64,
         chunks: &[(usize, String)], // (chunk_index, text)
     ) -> Result<Vec<i64>, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn
             .prepare(
                 "INSERT INTO chunks (doc_id, chunk_index, text, metadata) VALUES (?1, ?2, ?3, '')",
@@ -251,7 +270,7 @@ impl RagDb {
         embedding: &[f32],
         confidence: Option<f64>,
     ) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let bytes = embedding_to_bytes(embedding);
         conn.execute(
             "UPDATE chunks SET embedding = ?1, confidence = ?2 WHERE id = ?3",
@@ -268,7 +287,7 @@ impl RagDb {
         enriched_text: &str,
         enriched_embedding: Option<&Vec<f32>>,
     ) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let bytes = enriched_embedding.map(|e| embedding_to_bytes(e));
         conn.execute(
             "UPDATE chunks SET enriched_text = ?1, enriched_embedding = ?2 WHERE id = ?3",
@@ -289,7 +308,7 @@ impl RagDb {
     /// Get chunk IDs that haven't been enriched yet (across all documents).
     /// Returns up to `limit` IDs.
     pub fn unenriched_chunk_ids(&self, limit: usize) -> Result<Vec<i64>, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn
             .prepare(
                 "SELECT id FROM chunks WHERE enriched_text IS NULL AND embedding IS NOT NULL ORDER BY id LIMIT ?1",
@@ -305,7 +324,7 @@ impl RagDb {
 
     /// Get all chunk IDs belonging to a document.
     pub fn get_chunk_ids_for_doc(&self, doc_id: i64) -> Result<Vec<i64>, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn
             .prepare("SELECT id FROM chunks WHERE doc_id = ?1 ORDER BY chunk_index")
             .map_err(|e| format!("Query error: {e}"))?;
@@ -319,7 +338,7 @@ impl RagDb {
 
     /// Get a chunk by ID.
     pub fn get_chunk(&self, chunk_id: i64) -> Result<ChunkRecord, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.query_row(
             "SELECT id, doc_id, chunk_index, text, enriched_text, metadata, confidence
              FROM chunks WHERE id = ?1",
@@ -348,15 +367,18 @@ impl RagDb {
         &self,
         query_embedding: &[f32],
         top_k: usize,
-        _use_enriched: bool,
+        use_enriched: bool,
     ) -> Result<Vec<(i64, f32)>, String> {
-        let conn = self.conn.lock().unwrap();
-        // Prefer enriched_embedding if available, fall back to embedding
+        let conn = self.conn()?;
+        let sql = if use_enriched {
+            "SELECT id, COALESCE(enriched_embedding, embedding)
+             FROM chunks WHERE COALESCE(enriched_embedding, embedding) IS NOT NULL"
+        } else {
+            "SELECT id, embedding
+             FROM chunks WHERE embedding IS NOT NULL"
+        };
         let mut stmt = conn
-            .prepare(
-                "SELECT id, COALESCE(enriched_embedding, embedding) AS emb
-                 FROM chunks WHERE emb IS NOT NULL",
-            )
+            .prepare(sql)
             .map_err(|e| format!("Query error: {e}"))?;
 
         let mut scored: Vec<(i64, f32)> = stmt
@@ -384,7 +406,7 @@ impl RagDb {
         if ids.is_empty() {
             return Ok(vec![]);
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
         let sql = format!(
             "SELECT id, doc_id, chunk_index, text, enriched_text, metadata, confidence
@@ -424,7 +446,7 @@ impl RagDb {
 
     /// Get the document title for a chunk.
     pub fn doc_title_for_chunk(&self, chunk_id: i64) -> Result<String, String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.query_row(
             "SELECT d.title FROM documents d
              JOIN chunks c ON c.doc_id = d.id
@@ -433,5 +455,49 @@ impl RagDb {
             |row| row.get::<_, String>(0),
         )
         .map_err(|e| format!("Query error: {e}"))
+    }
+
+    // ── Bulk Embedding Access (for VectorIndex) ──
+
+    /// Get all chunk embeddings (prefer enriched). For loading VectorIndex on startup.
+    pub fn get_all_embeddings(&self) -> Result<Vec<(i64, Vec<f32>)>, String> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, COALESCE(enriched_embedding, embedding) FROM chunks
+                 WHERE COALESCE(enriched_embedding, embedding) IS NOT NULL",
+            )
+            .map_err(|e| format!("Query error: {e}"))?;
+        let results = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((id, bytes_to_embedding(&blob)))
+            })
+            .map_err(|e| format!("Query error: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(results)
+    }
+
+    /// Get embeddings for all chunks of a specific document (prefer enriched).
+    pub fn get_chunk_embeddings_for_doc(&self, doc_id: i64) -> Result<Vec<(i64, Vec<f32>)>, String> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, COALESCE(enriched_embedding, embedding) FROM chunks
+                 WHERE doc_id = ?1 AND COALESCE(enriched_embedding, embedding) IS NOT NULL",
+            )
+            .map_err(|e| format!("Query error: {e}"))?;
+        let results = stmt
+            .query_map(params![doc_id], |row| {
+                let id: i64 = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((id, bytes_to_embedding(&blob)))
+            })
+            .map_err(|e| format!("Query error: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(results)
     }
 }

@@ -61,6 +61,7 @@ function App() {
   const [ragDocs, setRagDocs] = useState<IngestionStatus[]>([]);
   const [ragResult, setRagResult] = useState<RagResult | null>(null);
   const [ragIngesting, setRagIngesting] = useState(false);
+  const [enrichmentStatus, setEnrichmentStatus] = useState<string | null>(null);
 
   // Clean up vision stream listener on unmount
   useEffect(() => {
@@ -145,12 +146,27 @@ function App() {
     if (chatMode === "rag") loadRagDocs();
   }, [chatMode]);
 
+  // Listen for enrichment progress events
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    listen<{ enriched_this_round: number; status: string }>("rag:enrichment_progress", (event) => {
+      if (event.payload.status === "in_progress") {
+        setEnrichmentStatus(`Enriched ${event.payload.enriched_this_round} chunks`);
+        // Refresh document list to show updated enrichment counts
+        if (chatMode === "rag") loadRagDocs();
+        // Clear status after 5 seconds
+        setTimeout(() => setEnrichmentStatus(null), 5000);
+      }
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [chatMode]);
+
   const ingestFile = async () => {
     try {
       const selected = await open({
         multiple: false,
         filters: [
-          { name: "Documents", extensions: ["pdf", "docx", "pptx", "txt", "md", "rs", "py", "js", "ts", "java", "c", "cpp", "go", "toml", "yaml", "json", "xml", "csv"] },
+          { name: "Documents", extensions: ["pdf", "docx", "pptx", "txt", "md", "rs", "py", "js", "ts", "java", "c", "cpp", "go", "toml", "yaml", "json", "xml", "csv", "mp3", "wav", "m4a", "ogg", "flac"] },
         ],
       });
       if (selected && typeof selected === "string") {
@@ -503,6 +519,7 @@ function App() {
               📁 Add Folder
             </button>
             {ragIngesting && <span style={{ color: '#ffaa00' }}>Ingesting...</span>}
+            {enrichmentStatus && <span style={{ color: '#28a745', fontSize: '12px' }}>✓ {enrichmentStatus}</span>}
           </div>
           {ragDocs.length === 0 ? (
             <p style={{ color: '#888', margin: '5px 0' }}>No documents ingested yet. Add files to build your knowledge base.</p>
