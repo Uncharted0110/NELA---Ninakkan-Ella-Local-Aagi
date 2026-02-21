@@ -37,6 +37,13 @@ interface RagResult {
   sources: SourceChunk[];
 }
 
+interface RagStreamSetup {
+  sources: SourceChunk[];
+  prompt: string;
+  llama_port: number;
+  no_retrieval: boolean;
+}
+
 function App() {
   const [models, setModels] = useState<ModelFile[]>([]);
   const [selectedModel, setSelectedModel] = useState("");
@@ -214,12 +221,75 @@ function App() {
     setLoading(true);
 
     try {
-      // RAG Mode
+      // RAG Mode — streaming: retrieve first, then SSE stream the answer
       if (chatMode === "rag") {
         try {
-          const result = await invoke<RagResult>("query_rag", { query: prompt });
-          setRagResult(result);
-          setResponse(result.answer);
+          // Phase 1: Retrieval (sources come back immediately)
+          const setup = await invoke<RagStreamSetup>("query_rag_stream", { query: prompt });
+
+          // Show sources immediately
+          setRagResult({ answer: "", sources: setup.sources });
+
+          // Handle empty results
+          if (!setup.prompt) {
+            const msg = setup.sources.length === 0
+              ? "No relevant documents found. Please ingest some documents first."
+              : "";
+            setResponse(msg);
+            setLoading(false);
+            return;
+          }
+
+          // Phase 2: Stream the answer from llama-server SSE
+          const res = await fetch(`http://127.0.0.1:${setup.llama_port}/v1/chat/completions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              messages: [
+                { role: "system", content: "You are a helpful assistant." },
+                { role: "user", content: setup.prompt },
+              ],
+              stream: true,
+            }),
+          });
+
+          if (!res.body) throw new Error("No response body");
+
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let fullAnswer = "";
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
+
+            for (const line of lines) {
+              if (!line.startsWith("data:")) continue;
+              const payload = line.replace("data:", "").trim();
+              if (payload === "[DONE]") {
+                setRagResult(prev => prev ? { ...prev, answer: fullAnswer } : null);
+                setLoading(false);
+                return;
+              }
+              try {
+                const json = JSON.parse(payload);
+                const delta = json.choices?.[0]?.delta;
+                if (delta && delta.content) {
+                  fullAnswer += delta.content;
+                  setResponse(prev => prev + delta.content);
+                }
+              } catch {
+                // ignore parse errors
+              }
+            }
+          }
+
+          setRagResult(prev => prev ? { ...prev, answer: fullAnswer } : null);
         } catch (e) {
           console.error(e);
           setResponse(`RAG query error: ${e}`);

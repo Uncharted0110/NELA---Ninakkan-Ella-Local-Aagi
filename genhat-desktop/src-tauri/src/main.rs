@@ -119,6 +119,9 @@ fn main() {
             app_lib::commands::rag::has_raptor_tree,
             app_lib::commands::rag::delete_raptor_tree,
             app_lib::commands::rag::query_rag_with_raptor,
+            // Streaming RAG commands
+            app_lib::commands::rag::query_rag_stream,
+            app_lib::commands::rag::query_rag_with_raptor_stream,
         ])
         .build(tauri::generate_context!())
         .expect("error building tauri app")

@@ -1,12 +1,27 @@
 //! Tauri IPC commands for the RAG subsystem.
 
 use crate::rag::pipeline::{IngestionStatus, RagPipeline, RagResult};
+use crate::commands::models::ProcessManagerState;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
 
 /// Tauri-managed state wrapper for the RAG pipeline.
 pub struct RagPipelineState(pub Arc<RagPipeline>);
+
+/// Response from the streaming RAG retrieve command.
+/// Frontend uses sources immediately, then streams the answer from llama-server SSE.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RagStreamSetup {
+    /// Source chunks retrieved for the query.
+    pub sources: Vec<crate::rag::pipeline::SourceChunk>,
+    /// The prompt to send to llama-server (augmented with context, or raw query).
+    pub prompt: String,
+    /// The llama-server port to stream from.
+    pub llama_port: u16,
+    /// Whether the classifier decided no retrieval was needed.
+    pub no_retrieval: bool,
+}
 
 /// Ingest a single document into the RAG knowledge base.
 #[tauri::command]
@@ -115,5 +130,104 @@ pub async fn query_rag_with_raptor(
     let pipeline = state.0.clone();
     let k = top_k.unwrap_or(5);
     pipeline.query_with_raptor(doc_id, &query, k).await
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Streaming RAG Commands
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Retrieve RAG sources and return everything needed for frontend SSE streaming.
+/// The frontend receives sources immediately and streams the LLM answer directly
+/// from the llama-server SSE endpoint.
+#[tauri::command]
+pub async fn query_rag_stream(
+    query: String,
+    top_k: Option<usize>,
+    rag_state: State<'_, RagPipelineState>,
+    pm_state: State<'_, ProcessManagerState>,
+) -> Result<RagStreamSetup, String> {
+    let pipeline = rag_state.0.clone();
+    let k = top_k.unwrap_or(5);
+
+    // Phase 1: Retrieval (classify → HyDE → search → RRF → grade)
+    let retrieval = pipeline.retrieve_for_query(&query, k).await?;
+
+    // Phase 2: Get the llama-server port (ensures it's running)
+    let active_id = pm_state.0.active_llm_id().await;
+    let _ = pm_state.0.ensure_running(&active_id, false).await?;
+    let llama_port = pm_state
+        .0
+        .get_llama_port(&active_id)
+        .await
+        .ok_or_else(|| "LLM not running or no port assigned".to_string())?;
+
+    // Determine the prompt to stream — use raw query for no_retrieval, else augmented prompt
+    let prompt = if retrieval.no_retrieval {
+        query
+    } else if retrieval.augmented_prompt.is_empty() {
+        // No sources found — return empty result so frontend can show a message
+        return Ok(RagStreamSetup {
+            sources: vec![],
+            prompt: String::new(),
+            llama_port,
+            no_retrieval: false,
+        });
+    } else {
+        retrieval.augmented_prompt
+    };
+
+    Ok(RagStreamSetup {
+        sources: retrieval.sources,
+        prompt,
+        llama_port,
+        no_retrieval: retrieval.no_retrieval,
+    })
+}
+
+/// Streaming RAPTOR query — retrieve using RAPTOR tree and return setup for SSE streaming.
+#[tauri::command]
+pub async fn query_rag_with_raptor_stream(
+    doc_id: i64,
+    query: String,
+    top_k: Option<usize>,
+    rag_state: State<'_, RagPipelineState>,
+    pm_state: State<'_, ProcessManagerState>,
+) -> Result<RagStreamSetup, String> {
+    let pipeline = rag_state.0.clone();
+    let k = top_k.unwrap_or(5);
+
+    // Phase 1: RAPTOR retrieval
+    let retrieval = pipeline
+        .retrieve_for_raptor_query(doc_id, &query, k)
+        .await?;
+
+    // Phase 2: Get the llama-server port
+    let active_id = pm_state.0.active_llm_id().await;
+    let _ = pm_state.0.ensure_running(&active_id, false).await?;
+    let llama_port = pm_state
+        .0
+        .get_llama_port(&active_id)
+        .await
+        .ok_or_else(|| "LLM not running or no port assigned".to_string())?;
+
+    let prompt = if retrieval.no_retrieval {
+        query
+    } else if retrieval.augmented_prompt.is_empty() {
+        return Ok(RagStreamSetup {
+            sources: vec![],
+            prompt: String::new(),
+            llama_port,
+            no_retrieval: false,
+        });
+    } else {
+        retrieval.augmented_prompt
+    };
+
+    Ok(RagStreamSetup {
+        sources: retrieval.sources,
+        prompt,
+        llama_port,
+        no_retrieval: retrieval.no_retrieval,
+    })
 }
 

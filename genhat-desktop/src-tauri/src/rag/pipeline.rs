@@ -37,6 +37,19 @@ pub struct RagResult {
     pub sources: Vec<SourceChunk>,
 }
 
+/// Result of the retrieval phase (sources + prompt, no LLM answer yet).
+/// Used by streaming commands — frontend streams the answer directly from llama-server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalResult {
+    /// Source chunks retrieved for the query.
+    pub sources: Vec<SourceChunk>,
+    /// The augmented prompt to send to the LLM (includes context + question).
+    /// Empty if no_retrieval — in that case send the raw user query.
+    pub augmented_prompt: String,
+    /// Whether the classifier decided no retrieval was needed.
+    pub no_retrieval: bool,
+}
+
 /// A source chunk with provenance info.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceChunk {
@@ -541,6 +554,231 @@ impl RagPipeline {
         };
 
         Ok(RagResult { answer, sources })
+    }
+
+    /// Perform the full retrieval pipeline without generating an answer.
+    /// Returns sources and the augmented prompt for streaming by the frontend.
+    pub async fn retrieve_for_query(
+        &self,
+        user_query: &str,
+        top_k: usize,
+    ) -> Result<RetrievalResult, String> {
+        // 0. Classify the query to decide retrieval strategy
+        let query_class = self.classify_query(user_query).await;
+        log::info!("Query classified as: {} (streaming)", query_class);
+
+        if query_class == "no_retrieval" {
+            return Ok(RetrievalResult {
+                sources: vec![],
+                augmented_prompt: String::new(),
+                no_retrieval: true,
+            });
+        }
+
+        // 1. Optional HyDE
+        let search_query = match self.try_hyde(user_query).await {
+            Some(hyde_text) => hyde_text,
+            None => user_query.to_string(),
+        };
+
+        // 2. BM25 keyword search
+        let bm25_results = self.bm25.search(user_query, top_k)?;
+
+        // 3. Vector similarity search
+        let vector_results = self.vector_search(&search_query, top_k).await?;
+
+        // 4. RRF fusion
+        let fused = rrf_fuse(&[bm25_results, vector_results]);
+
+        // 5. Take top-k fused results (fetch extra for grading headroom)
+        let grading_pool = top_k * 2;
+        let top_fused: Vec<&FusedResult> = fused.iter().take(grading_pool).collect();
+        let chunk_ids: Vec<i64> = top_fused.iter().map(|r| r.chunk_id).collect();
+
+        if chunk_ids.is_empty() {
+            return Ok(RetrievalResult {
+                sources: vec![],
+                augmented_prompt: String::new(),
+                no_retrieval: false,
+            });
+        }
+
+        // 6. Fetch chunk texts
+        let chunks = self.db.get_chunks_by_ids(&chunk_ids)?;
+
+        // 7. Grade chunks for relevance
+        let mut graded_sources: Vec<(SourceChunk, u8)> = Vec::new();
+        for fused_result in &top_fused {
+            if let Some(chunk) = chunks.iter().find(|c| c.id == fused_result.chunk_id) {
+                let doc_title = self
+                    .db
+                    .doc_title_for_chunk(chunk.id)
+                    .unwrap_or_else(|_| "Unknown".to_string());
+                let grade = self.grade_chunk(user_query, &chunk.text).await;
+                graded_sources.push((
+                    SourceChunk {
+                        chunk_id: chunk.id,
+                        doc_title,
+                        text: chunk.text.clone(),
+                        score: fused_result.rrf_score,
+                    },
+                    grade,
+                ));
+            }
+        }
+
+        graded_sources.retain(|(_, grade)| *grade >= 3);
+        graded_sources.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then(b.0.score.partial_cmp(&a.0.score).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        graded_sources.truncate(top_k);
+
+        let mut sources: Vec<SourceChunk> = graded_sources.into_iter().map(|(s, _)| s).collect();
+
+        // RAG Fusion: if all chunks failed grading, rephrase and retry once
+        if sources.is_empty() {
+            log::info!("All chunks failed grading — attempting RAG Fusion rephrase (streaming)");
+            let rephrased = self.generate_rephrasings(user_query).await;
+            let mut retry_sources = Vec::new();
+            for variant in &rephrased {
+                let bm25_r = self.bm25.search(variant, top_k).unwrap_or_default();
+                let vec_r = self.vector_search(variant, top_k).await.unwrap_or_default();
+                let fused_r = rrf_fuse(&[bm25_r, vec_r]);
+                let ids: Vec<i64> = fused_r.iter().take(top_k).map(|r| r.chunk_id).collect();
+                if let Ok(chunks) = self.db.get_chunks_by_ids(&ids) {
+                    for (fused_result, chunk) in fused_r.iter().zip(chunks.iter()) {
+                        let doc_title = self
+                            .db
+                            .doc_title_for_chunk(chunk.id)
+                            .unwrap_or_else(|_| "Unknown".to_string());
+                        retry_sources.push(SourceChunk {
+                            chunk_id: chunk.id,
+                            doc_title,
+                            text: chunk.text.clone(),
+                            score: fused_result.rrf_score,
+                        });
+                    }
+                }
+            }
+            retry_sources.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            retry_sources.dedup_by_key(|s| s.chunk_id);
+            retry_sources.truncate(top_k);
+            sources = retry_sources;
+        }
+
+        if sources.is_empty() {
+            return Ok(RetrievalResult {
+                sources: vec![],
+                augmented_prompt: String::new(),
+                no_retrieval: false,
+            });
+        }
+
+        // Build augmented prompt
+        let context = sources
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                format!("[Source {} — {}]\n{}", i + 1, s.doc_title, s.text)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let augmented_prompt = format!(
+            "Use the following context to answer the question. \
+             Cite sources using [Source N] when referencing specific information.\n\n\
+             Context:\n{context}\n\n\
+             Question: {user_query}\n\n\
+             Answer:"
+        );
+
+        Ok(RetrievalResult {
+            sources,
+            augmented_prompt,
+            no_retrieval: false,
+        })
+    }
+
+    /// Perform RAPTOR-based retrieval without generating an answer.
+    /// Returns sources and the augmented prompt for streaming by the frontend.
+    pub async fn retrieve_for_raptor_query(
+        &self,
+        doc_id: i64,
+        user_query: &str,
+        top_k: usize,
+    ) -> Result<RetrievalResult, String> {
+        use crate::rag::raptor;
+
+        // Fall back to standard retrieval if no RAPTOR tree
+        if !self.has_raptor_tree(doc_id)? {
+            log::info!(
+                "No RAPTOR tree for doc {}, falling back to standard retrieval (streaming)",
+                doc_id
+            );
+            return self.retrieve_for_query(user_query, top_k).await;
+        }
+
+        let raptor_results = raptor::raptor_retrieve(
+            self.db.clone(),
+            self.router.clone(),
+            doc_id,
+            user_query,
+            top_k,
+            None,
+        )
+        .await?;
+
+        if raptor_results.is_empty() {
+            return Ok(RetrievalResult {
+                sources: vec![],
+                augmented_prompt: String::new(),
+                no_retrieval: false,
+            });
+        }
+
+        let sources: Vec<SourceChunk> = raptor_results
+            .into_iter()
+            .map(|(chunk_id, score, text)| {
+                let doc_title = self
+                    .db
+                    .doc_title_for_chunk(chunk_id)
+                    .unwrap_or_else(|_| "RAPTOR Summary".to_string());
+                SourceChunk {
+                    chunk_id,
+                    doc_title,
+                    text,
+                    score,
+                }
+            })
+            .collect();
+
+        let context = sources
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                format!("[Source {} — {}]\n{}", i + 1, s.doc_title, s.text)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let augmented_prompt = format!(
+            "Use the following context to answer the question. \
+             Cite sources using [Source N] when referencing specific information.\n\n\
+             Context:\n{context}\n\n\
+             Question: {user_query}\n\n\
+             Answer:"
+        );
+
+        Ok(RetrievalResult {
+            sources,
+            augmented_prompt,
+            no_retrieval: false,
+        })
     }
 
     /// Retrieve context chunks without generating an answer.
