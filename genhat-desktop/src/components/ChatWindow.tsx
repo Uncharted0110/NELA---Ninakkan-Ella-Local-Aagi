@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { User, Bot, SendHorizonal, Sparkles } from "lucide-react";
 import MarkdownRenderer from "./MarkdownRenderer";
 
 interface ChatWindowProps {
@@ -20,10 +21,20 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
 }) => {
   const [inputObj, setInputObj] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, streamingContent]);
+
+  // Auto-resize textarea
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (ta) {
+      ta.style.height = "auto";
+      ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
+    }
+  }, [inputObj]);
 
   const handleSend = () => {
     if (!inputObj.trim()) return;
@@ -41,32 +52,58 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
   return (
     <div className="chat-container">
       <div className="messages-area">
+        {messages.length === 0 && !isLoading && (
+          <div className="empty-state">
+            <div className="empty-icon">
+              <Sparkles size={48} strokeWidth={1.2} />
+            </div>
+            <h2>GenHat</h2>
+            <p>Your local intelligence engine. Start a conversation below.</p>
+          </div>
+        )}
+
         {messages.map((msg, idx) => (
           <div key={idx} className={`message ${msg.role}`}>
-            <div className="avatar">{msg.role === "user" ? "You" : "AI"}</div>
-            <div className="content">
-              {msg.role === "assistant" ? (
-                <MarkdownRenderer content={msg.content} />
+            <div className="avatar">
+              {msg.role === "user" ? (
+                <User size={18} strokeWidth={2} />
               ) : (
-                msg.content
+                <Bot size={18} strokeWidth={2} />
               )}
+            </div>
+            <div className="msg-body">
+              <span className="msg-role">{msg.role === "user" ? "You" : "GenHat"}</span>
+              <div className="content">
+                {msg.role === "assistant" ? (
+                  <MarkdownRenderer content={msg.content} />
+                ) : (
+                  msg.content
+                )}
+              </div>
             </div>
           </div>
         ))}
 
         {isLoading && (
           <div className="message assistant loading">
-            <div className="avatar">AI</div>
-            <div className="content">
-              {streamingContent ? (
-                <MarkdownRenderer content={streamingContent} />
-              ) : (
-                <span className="typing-indicator">...</span>
-              )}
+            <div className="avatar">
+              <Bot size={18} strokeWidth={2} />
+            </div>
+            <div className="msg-body">
+              <span className="msg-role">GenHat</span>
+              <div className="content">
+                {streamingContent ? (
+                  <MarkdownRenderer content={streamingContent} />
+                ) : (
+                  <div className="typing-dots">
+                    <span></span><span></span><span></span>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
-        
+
         {/* Audio Player if generated */}
         {audioSrc && (
           <div className="audio-player">
@@ -78,19 +115,27 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
       </div>
 
       <div className="input-area">
-        <textarea
-          value={inputObj}
-          onChange={(e) => setInputObj(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder={placeholder}
-          rows={1}
-        />
-        <button onClick={handleSend} disabled={isLoading || !inputObj.trim()}>
-          {/* Arrow Icon SVG */}
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M5 12H19M19 12L12 5M19 12L12 19" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-        </button>
+        <div className="input-wrapper">
+          <textarea
+            ref={textareaRef}
+            value={inputObj}
+            onChange={(e) => setInputObj(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={placeholder}
+            rows={1}
+          />
+          <button
+            className="send-btn"
+            onClick={handleSend}
+            disabled={isLoading || !inputObj.trim()}
+            title="Send message"
+          >
+            <SendHorizonal size={18} strokeWidth={2} />
+          </button>
+        </div>
+        <span className="input-hint">
+          Press Enter to send, Shift+Enter for new line
+        </span>
       </div>
     </div>
   );

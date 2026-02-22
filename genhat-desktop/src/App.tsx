@@ -1,6 +1,21 @@
 import { useState, useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import {
+  MessageSquare,
+  Eye,
+  Volume2,
+  BookOpen,
+  Plus,
+  ImageIcon,
+  FileText,
+  FolderOpen,
+  X,
+  Trash2,
+  Loader2,
+  CheckCircle2,
+  ChevronDown,
+} from "lucide-react";
 import { Api } from "./api";
 import type {
   ChatMessage,
@@ -13,6 +28,19 @@ import type {
 import ChatWindow from "./components/ChatWindow";
 import ModelSelector from "./components/ModelSelector";
 import "./App.css";
+
+/* ── Mode metadata for the sidebar ──────────────────────────────────────── */
+const MODE_CONFIG: {
+  mode: ChatMode;
+  label: string;
+  icon: React.ElementType;
+  desc: string;
+}[] = [
+  { mode: "text", label: "Chat", icon: MessageSquare, desc: "Text conversation" },
+  { mode: "vision", label: "Vision", icon: Eye, desc: "Image analysis" },
+  { mode: "audio", label: "Audio", icon: Volume2, desc: "Text to speech" },
+  { mode: "rag", label: "RAG", icon: BookOpen, desc: "Document Q&A" },
+];
 
 function App() {
   // ── Model state ────────────────────────────────────────────────────────────
@@ -422,27 +450,62 @@ function App() {
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
+  const currentModeConfig = MODE_CONFIG.find((m) => m.mode === chatMode)!;
+
   return (
     <div className="app-container">
+      {/* ══════════ LEFT NAV SIDEBAR ══════════ */}
+      <nav className="nav-sidebar">
+        {/* Brand */}
+        <div className="nav-brand">
+          <div className="nav-brand-icon">G</div>
+        </div>
+
+        {/* Mode Buttons */}
+        <div className="nav-modes">
+          {MODE_CONFIG.map(({ mode, label, icon: Icon, desc }) => (
+            <button
+              key={mode}
+              className={`nav-mode-btn ${chatMode === mode ? "active" : ""}`}
+              onClick={() => setChatMode(mode)}
+              title={desc}
+            >
+              <Icon size={20} strokeWidth={1.8} />
+              <span className="nav-mode-label">{label}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* Spacer */}
+        <div className="nav-spacer" />
+
+        {/* New Chat */}
+        <button
+          className="nav-new-chat"
+          onClick={() => {
+            setMessages([]);
+            setStreamingContent("");
+            setAudioOutput("");
+            setRagResult(null);
+          }}
+          title="New conversation"
+        >
+          <Plus size={18} strokeWidth={2} />
+          <span className="nav-mode-label">New Chat</span>
+        </button>
+      </nav>
+
+      {/* ══════════ MAIN CONTENT ══════════ */}
       <main className="main-content">
-        {/* ── Top Header: Mode Tabs + Model Selector ── */}
-        <div className="chat-header">
-          <div className="mode-tabs">
-            {(["text", "vision", "audio", "rag"] as ChatMode[]).map((mode) => (
-              <button
-                key={mode}
-                className={`mode-tab ${chatMode === mode ? "active" : ""}`}
-                onClick={() => setChatMode(mode)}
-              >
-                {mode === "text" && "💬 Chat"}
-                {mode === "vision" && "🖼️ Vision"}
-                {mode === "audio" && "🔊 Audio"}
-                {mode === "rag" && "📚 RAG"}
-              </button>
-            ))}
+        {/* ── Top Bar ── */}
+        <header className="top-bar">
+          <div className="top-bar-left">
+            <currentModeConfig.icon size={18} strokeWidth={1.8} className="top-bar-icon" />
+            <h1 className="top-bar-title">{currentModeConfig.label}</h1>
+            <span className="top-bar-desc">{currentModeConfig.desc}</span>
           </div>
 
-          <div className="model-selector-group">
+          <div className="top-bar-right">
             {chatMode === "text" && (
               <ModelSelector
                 models={models}
@@ -475,123 +538,147 @@ function App() {
                     </option>
                   ))}
                 </select>
+                <ChevronDown size={14} className="select-chevron" />
               </div>
             )}
           </div>
-        </div>
+        </header>
 
         {/* ── Vision Panel ── */}
         {chatMode === "vision" && (
-          <div className="vision-panel">
-            <div className="vision-controls">
-              <button
-                onClick={selectImage}
-                disabled={loading}
-                className="panel-btn"
-              >
-                📁 Select Image
-              </button>
-              {imagePath && (
+          <div className="context-panel">
+            <div className="context-panel-header">
+              <ImageIcon size={16} strokeWidth={1.8} />
+              <span>Image Input</span>
+            </div>
+            <div className="context-panel-body">
+              <div className="vision-controls">
                 <button
-                  onClick={clearImage}
+                  onClick={selectImage}
                   disabled={loading}
-                  className="panel-btn danger"
+                  className="action-btn"
                 >
-                  ✕ Clear
+                  <ImageIcon size={14} />
+                  Select Image
                 </button>
-              )}
-              {imagePath && (
-                <span className="file-path">
-                  {imagePath.split("/").pop()}
-                </span>
+                {imagePath && (
+                  <button
+                    onClick={clearImage}
+                    disabled={loading}
+                    className="action-btn danger"
+                  >
+                    <X size={14} />
+                    Clear
+                  </button>
+                )}
+                {imagePath && (
+                  <span className="file-path-badge">
+                    {imagePath.split(/[/\\]/).pop()}
+                  </span>
+                )}
+              </div>
+              {imagePreview && (
+                <img
+                  src={imagePreview}
+                  alt="Selected"
+                  className="vision-preview"
+                />
               )}
             </div>
-            {imagePreview && (
-              <img
-                src={imagePreview}
-                alt="Selected"
-                className="vision-preview"
-              />
-            )}
           </div>
         )}
 
         {/* ── RAG Panel ── */}
         {chatMode === "rag" && (
-          <div className="rag-panel">
-            <div className="rag-controls">
-              <strong>Knowledge Base</strong>
-              <button
-                onClick={ingestFile}
-                disabled={ragIngesting}
-                className="panel-btn"
-              >
-                📄 Add File
-              </button>
-              <button
-                onClick={ingestDir}
-                disabled={ragIngesting}
-                className="panel-btn"
-              >
-                📁 Add Folder
-              </button>
+          <div className="context-panel">
+            <div className="context-panel-header">
+              <BookOpen size={16} strokeWidth={1.8} />
+              <span>Knowledge Base</span>
+              <div className="context-panel-actions">
+                <button
+                  onClick={ingestFile}
+                  disabled={ragIngesting}
+                  className="action-btn"
+                >
+                  <FileText size={14} />
+                  Add File
+                </button>
+                <button
+                  onClick={ingestDir}
+                  disabled={ragIngesting}
+                  className="action-btn"
+                >
+                  <FolderOpen size={14} />
+                  Add Folder
+                </button>
+              </div>
               {ragIngesting && (
-                <span className="status-indicator warning">Ingesting...</span>
+                <span className="status-badge warning">
+                  <Loader2 size={12} className="spin" />
+                  Ingesting...
+                </span>
               )}
               {enrichmentStatus && (
-                <span className="status-indicator success">
-                  ✓ {enrichmentStatus}
+                <span className="status-badge success">
+                  <CheckCircle2 size={12} />
+                  {enrichmentStatus}
                 </span>
               )}
             </div>
-            {ragDocs.length === 0 ? (
-              <p className="rag-empty">
-                No documents ingested yet. Add files to build your knowledge
-                base.
-              </p>
-            ) : (
-              <div className="rag-doc-list">
-                {ragDocs.map((doc) => (
-                  <div key={doc.doc_id} className="rag-doc-item">
-                    <span className="doc-title">{doc.title}</span>
-                    <span className="doc-meta">
-                      {doc.total_chunks} chunks
-                    </span>
-                    <span className="doc-meta">
-                      {doc.enriched_chunks}/{doc.total_chunks} enriched
-                    </span>
-                    <span
-                      className={`doc-phase ${
-                        doc.phase.includes("phase2_complete") ? "complete" : ""
-                      }`}
-                    >
-                      {doc.phase.replace(/_/g, " ")}
-                    </span>
-                    <button
-                      onClick={() => deleteRagDoc(doc.doc_id)}
-                      className="doc-delete"
-                    >
-                      ✕
-                    </button>
+            <div className="context-panel-body">
+              {ragDocs.length === 0 ? (
+                <p className="rag-empty">
+                  No documents ingested yet. Add files to build your knowledge base.
+                </p>
+              ) : (
+                <div className="rag-doc-list">
+                  {ragDocs.map((doc) => (
+                    <div key={doc.doc_id} className="rag-doc-item">
+                      <FileText size={14} className="doc-icon" />
+                      <span className="doc-title">{doc.title}</span>
+                      <span className="doc-meta">
+                        {doc.total_chunks} chunks
+                      </span>
+                      <span className="doc-meta">
+                        {doc.enriched_chunks}/{doc.total_chunks} enriched
+                      </span>
+                      <span
+                        className={`doc-phase ${
+                          doc.phase.includes("phase2_complete") ? "complete" : ""
+                        }`}
+                      >
+                        {doc.phase.replace(/_/g, " ")}
+                      </span>
+                      <button
+                        onClick={() => deleteRagDoc(doc.doc_id)}
+                        className="doc-delete"
+                        title="Remove document"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {/* RAG Source Citations */}
+              {ragResult && ragResult.sources.length > 0 && (
+                <div className="rag-sources">
+                  <div className="rag-sources-header">
+                    <FileText size={14} />
+                    <strong>Sources ({ragResult.sources.length})</strong>
                   </div>
-                ))}
-              </div>
-            )}
-            {/* RAG Source Citations */}
-            {ragResult && ragResult.sources.length > 0 && (
-              <div className="rag-sources">
-                <strong>📄 Sources ({ragResult.sources.length})</strong>
-                {ragResult.sources.map((src, i) => (
-                  <details key={src.chunk_id} className="source-item">
-                    <summary>
-                      [Source {i + 1}] {src.doc_title} (score:{" "}
-                      {src.score.toFixed(4)})
-                    </summary>
-                    <pre className="source-text">{src.text}</pre>
-                  </details>
-                ))}
-              </div>
-            )}
+                  {ragResult.sources.map((src, i) => (
+                    <details key={src.chunk_id} className="source-item">
+                      <summary>
+                        [Source {i + 1}] {src.doc_title} (score:{" "}
+                        {src.score.toFixed(4)})
+                      </summary>
+                      <pre className="source-text">{src.text}</pre>
+                    </details>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
