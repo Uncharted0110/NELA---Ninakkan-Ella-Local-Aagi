@@ -1,4 +1,4 @@
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import type {
   ChatMessage,
   ModelFile,
@@ -69,14 +69,12 @@ export const Api = {
     input: string,
     options?: { voice?: string; speed?: number }
   ): Promise<string> {
-    const filePath = await invoke<string>("generate_speech", {
+    // Backend returns a data:audio/wav;base64,… URL directly
+    return invoke<string>("generate_speech", {
       input,
       voice: options?.voice ?? null,
       speed: options?.speed ?? null,
     });
-    // Read the generated audio file as a base64 data URL
-    // (avoids asset-protocol scope issues in Tauri 2)
-    return invoke<string>("read_audio_base64", { path: filePath });
   },
 
   /** Transcribe an audio file to text using Whisper. */
@@ -324,3 +322,7 @@ export const Api = {
     }
   },
 };
+function convertFileSrc(filePath: string): string {
+  return new URL(`file://${filePath}`).href;
+}
+

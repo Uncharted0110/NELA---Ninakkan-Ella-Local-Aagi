@@ -1022,7 +1022,10 @@ impl RagPipeline {
         top_k: usize,
         similarity_threshold: f32,
     ) -> Vec<crate::rag::db::MediaAssetRecord> {
-        if response_text.trim().is_empty() {
+        let trimmed = response_text.trim();
+        // Skip media retrieval for empty or very short/generic responses
+        // that are unlikely to reference specific document content.
+        if trimmed.is_empty() || trimmed.split_whitespace().count() < 15 {
             return vec![];
         }
 

@@ -200,7 +200,7 @@ pub async fn retrieve_media_for_response(
 ) -> Result<Vec<crate::rag::db::MediaAssetRecord>, String> {
     let pipeline = state.0.clone();
     let k = top_k.unwrap_or(3);
-    let sim_threshold = threshold.unwrap_or(0.3);
+    let sim_threshold = threshold.unwrap_or(0.55);
     Ok(pipeline
         .retrieve_media_for_response(&response_text, k, sim_threshold)
         .await)

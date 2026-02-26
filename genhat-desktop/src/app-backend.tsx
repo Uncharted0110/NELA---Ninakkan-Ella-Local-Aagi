@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
@@ -223,10 +223,11 @@ function App() {
       // Audio Mode
       if (chatMode === "audio") {
          try {
-           const path = await invoke<string>("generate_speech", {
+           // Backend returns a data:audio/wav;base64,… URL directly
+           const dataUrl = await invoke<string>("generate_speech", {
              input: prompt,
            });
-           setAudioOutput(convertFileSrc(path));
+           setAudioOutput(dataUrl);
          } catch (e) {
            console.error(e);
            setResponse(`Error generating audio: ${e}`);

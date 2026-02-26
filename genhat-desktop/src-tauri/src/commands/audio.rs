@@ -4,6 +4,7 @@
 
 use crate::commands::inference::TaskRouterState;
 use crate::registry::types::{TaskRequest, TaskType};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use std::collections::HashMap;
 use tauri::State;
 
@@ -15,7 +16,7 @@ use tauri::State;
 /// * `speed` — Optional speaking speed (e.g. 1.0)
 ///
 /// # Returns
-/// Absolute path to the generated `.wav` file.
+/// A `data:audio/wav;base64,…` URL that can be used directly in an `<audio>` element.
 #[tauri::command]
 pub async fn generate_speech(
     input: String,
@@ -40,10 +41,21 @@ pub async fn generate_speech(
         extra,
     };
 
-    match router_state.0.route(&request).await? {
-        crate::registry::types::TaskResponse::FilePath(path) => Ok(path),
-        other => Err(format!("Unexpected TTS response: {other:?}")),
-    }
+    let file_path = match router_state.0.route(&request).await? {
+        crate::registry::types::TaskResponse::FilePath(path) => path,
+        other => return Err(format!("Unexpected TTS response: {other:?}")),
+    };
+
+    // Read the WAV file and return it as a base64 data URL so the webview can
+    // play it without needing asset-protocol scope permissions.
+    let wav_bytes = std::fs::read(&file_path)
+        .map_err(|e| format!("Failed to read generated WAV file: {e}"))?;
+    let b64 = STANDARD.encode(&wav_bytes);
+
+    // Clean up the temp file (best-effort)
+    let _ = std::fs::remove_file(&file_path);
+
+    Ok(format!("data:audio/wav;base64,{b64}"))
 }
 
 /// Transcribe an audio file to text using Whisper.
