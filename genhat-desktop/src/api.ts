@@ -6,6 +6,7 @@ import type {
   IngestionStatus,
   RagResult,
   RagStreamSetup,
+  MediaAsset,
 } from "./types";
 
 export const Api = {
@@ -63,7 +64,7 @@ export const Api = {
 
   // ── Audio ──────────────────────────────────────────────────────────────────
 
-  /** Generate speech from text using the TTS backend. Returns a playable URL. */
+  /** Generate speech from text using the TTS backend. Returns a playable data URL. */
   async generateSpeech(
     input: string,
     options?: { voice?: string; speed?: number }
@@ -73,7 +74,9 @@ export const Api = {
       voice: options?.voice ?? null,
       speed: options?.speed ?? null,
     });
-    return convertFileSrc(filePath);
+    // Read the generated audio file as a base64 data URL
+    // (avoids asset-protocol scope issues in Tauri 2)
+    return invoke<string>("read_audio_base64", { path: filePath });
   },
 
   /** Transcribe an audio file to text using Whisper. */
@@ -189,6 +192,38 @@ export const Api = {
       query,
       topK,
     });
+  },
+
+  // ── Media Retrieval ────────────────────────────────────────────────────────
+
+  /**
+   * Two-phase media retrieval: given the LLM's response text, find images/tables
+   * whose captions are semantically similar to the response content.
+   * Returns media assets that should be displayed alongside the chat answer.
+   */
+  async retrieveMediaForResponse(
+    responseText: string,
+    topK?: number,
+    threshold?: number
+  ): Promise<MediaAsset[]> {
+    return invoke<MediaAsset[]>("retrieve_media_for_response", {
+      responseText,
+      topK: topK ?? null,
+      threshold: threshold ?? null,
+    });
+  },
+
+  /** Get all media assets for a specific ingested document. */
+  async getMediaForDocument(docId: number): Promise<MediaAsset[]> {
+    return invoke<MediaAsset[]>("get_media_for_document", { docId });
+  },
+
+  /**
+   * Convert an absolute file path to a Tauri asset URL for display in an <img> tag.
+   * Uses Tauri's convertFileSrc to create a localhost URL the webview can load.
+   */
+  mediaUrl(filePath: string): string {
+    return convertFileSrc(filePath);
   },
 
   // ── Inference Routing ──────────────────────────────────────────────────────

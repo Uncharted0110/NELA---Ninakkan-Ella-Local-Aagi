@@ -113,6 +113,7 @@ impl RagPipeline {
     // ═══════════════════════════════════════════════════════════════════════
 
     /// Ingest a single document: parse → chunk → embed → store + index.
+    /// Also extracts and stores media assets (images, tables) as PNG files.
     pub async fn ingest_document(&self, file_path: &Path) -> Result<IngestionStatus, String> {
         let _lock = self.ingest_lock.lock().await;
 
@@ -126,11 +127,22 @@ impl RagPipeline {
             return Err(format!("Document already ingested: {}", path_str));
         }
 
-        // 1. Parse document
-        let mut parsed = parsers::parse_document(file_path)?;
+        // Prepare media output directory inside the data dir
+        // (next to rag.db, under a "media/" subfolder)
+        let media_dir = self.db.path.parent()
+            .map(|p| p.join("media"))
+            .unwrap_or_else(|| std::path::PathBuf::from("media"));
+
+        // 1. Parse document (with media extraction)
+        let mut parsed = parsers::parse_document_with_media(file_path, Some(&media_dir))?;
         let title = parsed.title.clone();
         
-        log::info!("Parsed document '{}' into {} sections", title, parsed.sections.len());
+        log::info!(
+            "Parsed document '{}' into {} sections + {} media elements",
+            title,
+            parsed.sections.len(),
+            parsed.media_elements().len()
+        );
         for (i, sec) in parsed.sections.iter().take(3).enumerate() {
             log::debug!("  Section {}: {} chars", i + 1, sec.text.len());
         }
@@ -231,6 +243,12 @@ impl RagPipeline {
         // 6. Embed chunks via TaskRouter
         let embedded_count = self.embed_chunks(&chunk_ids, &all_chunks).await;
 
+        // 7. Store media assets and embed their captions
+        let media_count = self.store_media_assets(doc_id, &parsed).await;
+        if media_count > 0 {
+            log::info!("Stored {media_count} media assets for document '{title}'");
+        }
+
         Ok(IngestionStatus {
             doc_id,
             title,
@@ -239,6 +257,81 @@ impl RagPipeline {
             enriched_chunks: 0,
             phase: "phase1_complete".to_string(),
         })
+    }
+
+    /// Store extracted media elements (images/tables) in the DB and embed their captions.
+    async fn store_media_assets(
+        &self,
+        doc_id: i64,
+        parsed: &parsers::ParsedDocument,
+    ) -> usize {
+        let media_elements = parsed.media_elements();
+        if media_elements.is_empty() {
+            return 0;
+        }
+
+        let mut stored = 0usize;
+        let mut captions_to_embed: Vec<(i64, String)> = Vec::new();
+
+        for elem in &media_elements {
+            let asset_type = match elem.kind {
+                parsers::ElementKind::Image => "image",
+                parsers::ElementKind::Table => "table",
+                _ => continue,
+            };
+
+            let file_path = match &elem.media_path {
+                Some(p) => p.to_string_lossy().to_string(),
+                None => continue,
+            };
+
+            match self.db.insert_media_asset(
+                doc_id,
+                asset_type,
+                &file_path,
+                &elem.text,
+                &elem.metadata,
+            ) {
+                Ok(asset_id) => {
+                    stored += 1;
+                    // Queue caption for embedding
+                    if !elem.text.is_empty() {
+                        captions_to_embed.push((asset_id, elem.text.clone()));
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to store media asset: {e}");
+                }
+            }
+        }
+
+        // Batch embed all captions
+        if !captions_to_embed.is_empty() {
+            let texts: Vec<String> = captions_to_embed.iter().map(|(_, t)| t.clone()).collect();
+            let request = tasks::embed_request(texts);
+
+            match self.router.route(&request).await {
+                Ok(TaskResponse::Embeddings(vectors)) => {
+                    for (i, embedding) in vectors.iter().enumerate() {
+                        if i < captions_to_embed.len() {
+                            let asset_id = captions_to_embed[i].0;
+                            if let Ok(()) = self.db.set_media_embedding(asset_id, embedding) {
+                                // Also add to in-memory vector index (negative ID for media)
+                                self.vec_index.insert(-asset_id, embedding.clone());
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {
+                    log::warn!("Caption embedding returned unexpected response type");
+                }
+                Err(e) => {
+                    log::warn!("Caption embedding failed: {e}");
+                }
+            }
+        }
+
+        stored
     }
 
     /// Embed a batch of chunks and store embeddings in the DB.
@@ -908,6 +1001,69 @@ impl RagPipeline {
         }
 
         Ok(sources)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Two-Phase Media Retrieval
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Two-phase media retrieval: given the LLM's response text, find media
+    /// assets whose captions are semantically similar to parts of the response.
+    ///
+    /// This is the key insight from the TDS article: matching the *response*
+    /// to image captions (not the user *query*) dramatically improves recall
+    /// because the LLM's answer contains the specific terminology and context
+    /// that was near the image in the original document.
+    ///
+    /// Returns a list of `MediaAssetRecord`s that are relevant to the answer.
+    pub async fn retrieve_media_for_response(
+        &self,
+        response_text: &str,
+        top_k: usize,
+        similarity_threshold: f32,
+    ) -> Vec<crate::rag::db::MediaAssetRecord> {
+        if response_text.trim().is_empty() {
+            return vec![];
+        }
+
+        // Embed the response text
+        let request = tasks::embed_request(vec![response_text.to_string()]);
+        let response_embedding = match self.router.route(&request).await {
+            Ok(TaskResponse::Embeddings(mut vecs)) => {
+                if vecs.is_empty() {
+                    return vec![];
+                }
+                vecs.remove(0)
+            }
+            _ => return vec![],
+        };
+
+        // Search against media caption embeddings
+        let media_results = self
+            .db
+            .media_vector_search(&response_embedding, top_k)
+            .unwrap_or_default();
+
+        // Filter by similarity threshold and fetch full records
+        let mut assets = Vec::new();
+        for (asset_id, sim) in &media_results {
+            if *sim >= similarity_threshold {
+                if let Ok(asset) = self.db.get_media_asset(*asset_id) {
+                    // Verify the file still exists on disk
+                    if std::path::Path::new(&asset.file_path).exists() {
+                        log::debug!(
+                            "Media match: {} (sim={:.3}, type={})",
+                            asset.file_path,
+                            sim,
+                            asset.asset_type
+                        );
+                        assets.push(asset);
+                    }
+                }
+            }
+        }
+
+        assets
     }
 
     /// Attempt HyDE: generate a hypothetical answer, use it for embedding search.

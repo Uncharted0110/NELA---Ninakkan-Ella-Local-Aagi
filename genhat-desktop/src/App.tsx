@@ -24,6 +24,7 @@ import type {
   RegisteredModel,
   IngestionStatus,
   RagResult,
+  MediaAsset,
   KittenTtsVoice,
 } from "./types";
 import { KITTEN_TTS_VOICES } from "./types";
@@ -77,6 +78,8 @@ function App() {
   const [ragResult, setRagResult] = useState<RagResult | null>(null);
   const [ragIngesting, setRagIngesting] = useState(false);
   const [enrichmentStatus, setEnrichmentStatus] = useState<string | null>(null);
+  /** Media assets (images/tables) keyed by message index in the messages array. */
+  const [mediaAssets, setMediaAssets] = useState<Record<number, MediaAsset[]>>({});
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -321,10 +324,27 @@ function App() {
               setRagResult((prev) =>
                 prev ? { ...prev, answer: fullAnswer } : null
               );
-              setMessages((prev) => [
-                ...prev,
-                { role: "assistant", content: fullAnswer },
-              ]);
+              setMessages((prev) => {
+                const updated = [
+                  ...prev,
+                  { role: "assistant" as const, content: fullAnswer },
+                ];
+                // Two-phase media retrieval: match response → captions
+                const assistantIdx = updated.length - 1;
+                Api.retrieveMediaForResponse(fullAnswer)
+                  .then((assets) => {
+                    if (assets.length > 0) {
+                      setMediaAssets((prev) => ({
+                        ...prev,
+                        [assistantIdx]: assets,
+                      }));
+                    }
+                  })
+                  .catch((e) =>
+                    console.warn("Media retrieval failed:", e)
+                  );
+                return updated;
+              });
               setStreamingContent("");
               setLoading(false);
             },
@@ -784,6 +804,7 @@ function App() {
           cancelled={cancelled}
           audioSrc={audioOutput}
           placeholder={getPlaceholder()}
+          mediaAssets={mediaAssets}
         />
       </main>
     </div>

@@ -106,6 +106,7 @@ fn main() {
             app_lib::commands::inference::vision_chat,
             app_lib::commands::inference::vision_chat_stream,
             app_lib::commands::audio::transcribe_audio,
+            app_lib::commands::audio::read_audio_base64,
             // RAG commands
             app_lib::commands::rag::ingest_document,
             app_lib::commands::rag::ingest_folder,
@@ -121,6 +122,9 @@ fn main() {
             // Streaming RAG commands
             app_lib::commands::rag::query_rag_stream,
             app_lib::commands::rag::query_rag_with_raptor_stream,
+            // Media retrieval commands
+            app_lib::commands::rag::retrieve_media_for_response,
+            app_lib::commands::rag::get_media_for_document,
         ])
         .build(tauri::generate_context!())
         .expect("error building tauri app")

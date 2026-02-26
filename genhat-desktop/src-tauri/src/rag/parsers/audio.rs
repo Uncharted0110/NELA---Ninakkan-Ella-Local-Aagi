@@ -16,13 +16,13 @@ pub fn parse_placeholder(path: &Path) -> ParsedDocument {
         .unwrap_or("audio")
         .to_string();
 
-    ParsedDocument {
+    ParsedDocument::text_only(
         title,
-        sections: vec![TextBlock {
+        vec![TextBlock {
             text: format!("[Audio file: {}]", path.display()),
             metadata: "audio:pending".into(),
         }],
-    }
+    )
 }
 
 /// Build a ParsedDocument from transcription segments returned by the
@@ -39,8 +39,5 @@ pub fn from_transcription(
         })
         .collect();
 
-    ParsedDocument {
-        title: title.to_string(),
-        sections,
-    }
+    ParsedDocument::text_only(title.to_string(), sections)
 }

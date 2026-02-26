@@ -184,6 +184,38 @@ pub async fn query_rag_stream(
     })
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Media Retrieval Commands
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Two-phase media retrieval: given the LLM's response text, find images/tables
+/// whose captions are semantically similar to the response content.
+/// Returns media assets that should be displayed alongside the chat answer.
+#[tauri::command]
+pub async fn retrieve_media_for_response(
+    response_text: String,
+    top_k: Option<usize>,
+    threshold: Option<f32>,
+    state: State<'_, RagPipelineState>,
+) -> Result<Vec<crate::rag::db::MediaAssetRecord>, String> {
+    let pipeline = state.0.clone();
+    let k = top_k.unwrap_or(3);
+    let sim_threshold = threshold.unwrap_or(0.3);
+    Ok(pipeline
+        .retrieve_media_for_response(&response_text, k, sim_threshold)
+        .await)
+}
+
+/// Get all media assets for a specific document.
+#[tauri::command]
+pub async fn get_media_for_document(
+    doc_id: i64,
+    state: State<'_, RagPipelineState>,
+) -> Result<Vec<crate::rag::db::MediaAssetRecord>, String> {
+    let pipeline = state.0.clone();
+    pipeline.db.get_media_for_doc(doc_id)
+}
+
 /// Streaming RAPTOR query — retrieve using RAPTOR tree and return setup for SSE streaming.
 #[tauri::command]
 pub async fn query_rag_with_raptor_stream(

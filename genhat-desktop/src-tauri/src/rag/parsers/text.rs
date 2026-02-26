@@ -26,7 +26,7 @@ pub fn parse(path: &Path) -> Result<ParsedDocument, String> {
         _ => split_by_paragraphs(&content),
     };
 
-    Ok(ParsedDocument { title, sections })
+    Ok(ParsedDocument::text_only(title, sections))
 }
 
 /// Split markdown by headings (# lines).

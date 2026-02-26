@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import MarkdownRenderer from "./MarkdownRenderer";
+import { Api } from "../api";
+import type { MediaAsset } from "../types";
 
 /** Copy button for a full assistant response */
 const CopyMsgButton: React.FC<{ text: string }> = ({ text }) => {
@@ -47,7 +49,74 @@ interface ChatWindowProps {
   cancelled?: boolean;
   audioSrc?: string;
   placeholder?: string;
+  /** Media assets (images/tables) keyed by message index. */
+  mediaAssets?: Record<number, MediaAsset[]>;
 }
+
+/** Inline gallery for extracted images/tables attached to an assistant message. */
+const MediaGallery: React.FC<{ assets: MediaAsset[] }> = ({ assets }) => {
+  const [expanded, setExpanded] = useState<number | null>(null);
+  // Load images as base64 data URLs via the backend (avoids asset-protocol issues)
+  const [dataUrls, setDataUrls] = useState<Record<number, string>>({});
+
+  useEffect(() => {
+    if (!assets || assets.length === 0) return;
+    let cancelled = false;
+
+    const loadAll = async () => {
+      const entries: [number, string][] = [];
+      for (const asset of assets) {
+        try {
+          const dataUrl = await Api.readImageBase64(asset.file_path);
+          if (!cancelled) entries.push([asset.id, dataUrl]);
+        } catch (e) {
+          console.warn(`Failed to load media ${asset.id}:`, e);
+        }
+      }
+      if (!cancelled) {
+        setDataUrls(Object.fromEntries(entries));
+      }
+    };
+
+    loadAll();
+    return () => { cancelled = true; };
+  }, [assets]);
+
+  if (!assets || assets.length === 0) return null;
+
+  return (
+    <div className="media-gallery">
+      <div className="media-gallery-label">
+        📎 {assets.length} related {assets.length === 1 ? "figure" : "figures"}
+      </div>
+      <div className="media-gallery-grid">
+        {assets.map((asset) => (
+          <div
+            key={asset.id}
+            className={`media-thumb ${expanded === asset.id ? "expanded" : ""}`}
+            onClick={() => setExpanded(expanded === asset.id ? null : asset.id)}
+          >
+            {dataUrls[asset.id] ? (
+              <img
+                src={dataUrls[asset.id]}
+                alt={asset.caption || `${asset.asset_type} from document`}
+                loading="lazy"
+              />
+            ) : (
+              <div className="media-loading">Loading…</div>
+            )}
+            <span className="media-badge">
+              {asset.asset_type === "table" ? "📊" : "🖼️"}
+            </span>
+            {expanded === asset.id && asset.caption && (
+              <div className="media-caption">{asset.caption}</div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
 
 const ChatWindow: React.FC<ChatWindowProps> = ({
   messages,
@@ -58,6 +127,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
   cancelled = false,
   audioSrc,
   placeholder = "Message NELA...",
+  mediaAssets = {},
 }) => {
   const [inputObj, setInputObj] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
@@ -100,6 +170,9 @@ const ChatWindow: React.FC<ChatWindowProps> = ({
                 <div className="content">
                   <div className="assistant-body">
                     <MarkdownRenderer content={msg.content} />
+                    {mediaAssets[idx] && (
+                      <MediaGallery assets={mediaAssets[idx]} />
+                    )}
                     <div className="msg-actions">
                       <CopyMsgButton text={msg.content} />
                     </div>

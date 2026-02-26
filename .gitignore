@@ -14,3 +14,4 @@ The-Bare/TTS-inference/--collect-data
 The-Bare/TTS-inference/--hidden-import
 .DS_Store
 genhat-desktop/package-lock.json
+genhat-desktop/src-tauri/bin/pdfium-lin/libpdfium.so

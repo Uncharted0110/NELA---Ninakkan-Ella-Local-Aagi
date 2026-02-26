@@ -68,3 +68,35 @@ pub async fn transcribe_audio(
 
     router_state.0.route(&request).await
 }
+
+/// Read an audio file and return it as a base64-encoded data URL.
+///
+/// This avoids the need for the Tauri asset protocol scope — the webview
+/// can play the audio directly from the data URL.
+#[tauri::command]
+pub fn read_audio_base64(path: String) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let path = std::path::Path::new(&path);
+    if !path.exists() {
+        return Err(format!("Audio file not found: {}", path.display()));
+    }
+
+    let mime = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .as_deref()
+    {
+        Some("wav") => "audio/wav",
+        Some("mp3") => "audio/mpeg",
+        Some("ogg") | Some("opus") => "audio/ogg",
+        Some("flac") => "audio/flac",
+        Some("aac") | Some("m4a") => "audio/aac",
+        _ => "audio/wav",
+    };
+
+    let data = std::fs::read(path).map_err(|e| format!("Failed to read audio file: {e}"))?;
+    let b64 = STANDARD.encode(&data);
+    Ok(format!("data:{};base64,{}", mime, b64))
+}

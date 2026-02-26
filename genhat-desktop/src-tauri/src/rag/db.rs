@@ -40,6 +40,23 @@ pub struct ChunkRecord {
     pub confidence: Option<f64>,
 }
 
+/// A stored media asset (image or table extracted from a document).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MediaAssetRecord {
+    pub id: i64,
+    pub doc_id: i64,
+    /// "image" or "table"
+    pub asset_type: String,
+    /// Path to the extracted PNG file on disk.
+    pub file_path: String,
+    /// Context-aware caption (surrounding text from document).
+    pub caption: String,
+    /// Source metadata (e.g. "page:3:image:2").
+    pub metadata: String,
+    /// SHA-256 hash of the caption embedding (for dedup).
+    pub caption_hash: Option<String>,
+}
+
 /// Handle to the RAG database backed by an r2d2 connection pool.
 #[derive(Clone)]
 pub struct RagDb {
@@ -132,6 +149,7 @@ impl RagDb {
 
         db.create_tables()?;
         db.create_raptor_tables()?;
+        db.create_media_tables()?;
         Ok(db)
     }
 
@@ -166,6 +184,29 @@ impl RagDb {
             ",
         )
         .map_err(|e| format!("Failed to create tables: {e}"))
+    }
+
+    fn create_media_tables(&self) -> Result<(), String> {
+        let conn = self.conn()?;
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS media_assets (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id       INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                asset_type   TEXT NOT NULL CHECK(asset_type IN ('image', 'table')),
+                file_path    TEXT NOT NULL,
+                caption      TEXT NOT NULL DEFAULT '',
+                metadata     TEXT NOT NULL DEFAULT '',
+                caption_hash TEXT,
+                embedding    BLOB,
+                created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_media_doc ON media_assets(doc_id);
+            CREATE INDEX IF NOT EXISTS idx_media_type ON media_assets(asset_type);
+            ",
+        )
+        .map_err(|e| format!("Failed to create media tables: {e}"))
     }
 
     // ── Document CRUD ──
@@ -548,5 +589,167 @@ impl RagDb {
             .filter_map(|r| r.ok())
             .collect();
         Ok(results)
+    }
+
+    // ── Media Asset CRUD ──
+
+    /// Insert a media asset record. Returns the asset ID.
+    pub fn insert_media_asset(
+        &self,
+        doc_id: i64,
+        asset_type: &str,
+        file_path: &str,
+        caption: &str,
+        metadata: &str,
+    ) -> Result<i64, String> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO media_assets (doc_id, asset_type, file_path, caption, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![doc_id, asset_type, file_path, caption, metadata],
+        )
+        .map_err(|e| format!("Insert media asset error: {e}"))?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Store the caption embedding for a media asset.
+    pub fn set_media_embedding(
+        &self,
+        asset_id: i64,
+        embedding: &[f32],
+    ) -> Result<(), String> {
+        let conn = self.conn()?;
+        let bytes = embedding_to_bytes(embedding);
+        conn.execute(
+            "UPDATE media_assets SET embedding = ?1 WHERE id = ?2",
+            params![bytes, asset_id],
+        )
+        .map_err(|e| format!("Set media embedding error: {e}"))
+        .map(|_| ())
+    }
+
+    /// Get all media assets for a document.
+    pub fn get_media_for_doc(&self, doc_id: i64) -> Result<Vec<MediaAssetRecord>, String> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, doc_id, asset_type, file_path, caption, metadata, caption_hash
+                 FROM media_assets WHERE doc_id = ?1 ORDER BY id",
+            )
+            .map_err(|e| format!("Query error: {e}"))?;
+
+        let assets = stmt
+            .query_map(params![doc_id], |row| {
+                Ok(MediaAssetRecord {
+                    id: row.get(0)?,
+                    doc_id: row.get(1)?,
+                    asset_type: row.get(2)?,
+                    file_path: row.get(3)?,
+                    caption: row.get(4)?,
+                    metadata: row.get(5)?,
+                    caption_hash: row.get(6)?,
+                })
+            })
+            .map_err(|e| format!("Query error: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(assets)
+    }
+
+    /// Get a media asset by ID.
+    pub fn get_media_asset(&self, asset_id: i64) -> Result<MediaAssetRecord, String> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT id, doc_id, asset_type, file_path, caption, metadata, caption_hash
+             FROM media_assets WHERE id = ?1",
+            params![asset_id],
+            |row| {
+                Ok(MediaAssetRecord {
+                    id: row.get(0)?,
+                    doc_id: row.get(1)?,
+                    asset_type: row.get(2)?,
+                    file_path: row.get(3)?,
+                    caption: row.get(4)?,
+                    metadata: row.get(5)?,
+                    caption_hash: row.get(6)?,
+                })
+            },
+        )
+        .map_err(|e| format!("Get media asset error: {e}"))
+    }
+
+    /// Get all media asset embeddings (for loading into VectorIndex).
+    /// Returns (negative_asset_id, embedding) — negative IDs distinguish media from chunks.
+    pub fn get_all_media_embeddings(&self) -> Result<Vec<(i64, Vec<f32>)>, String> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, embedding FROM media_assets WHERE embedding IS NOT NULL",
+            )
+            .map_err(|e| format!("Query error: {e}"))?;
+        let results = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                // Use negative IDs for media assets to distinguish from chunk IDs
+                Ok((-id, bytes_to_embedding(&blob)))
+            })
+            .map_err(|e| format!("Query error: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(results)
+    }
+
+    /// Delete all media assets for a document (also deletes files from disk).
+    pub fn delete_media_for_doc(&self, doc_id: i64) -> Result<Vec<String>, String> {
+        let conn = self.conn()?;
+
+        // Collect file paths first
+        let mut stmt = conn
+            .prepare("SELECT file_path FROM media_assets WHERE doc_id = ?1")
+            .map_err(|e| format!("Query error: {e}"))?;
+        let paths: Vec<String> = stmt
+            .query_map(params![doc_id], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Query error: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        conn.execute("DELETE FROM media_assets WHERE doc_id = ?1", params![doc_id])
+            .map_err(|e| format!("Delete media error: {e}"))?;
+
+        Ok(paths)
+    }
+
+    /// Search media assets by caption embedding similarity.
+    /// Returns (asset_id, similarity) pairs sorted descending.
+    pub fn media_vector_search(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<(i64, f32)>, String> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare("SELECT id, embedding FROM media_assets WHERE embedding IS NOT NULL")
+            .map_err(|e| format!("Query error: {e}"))?;
+
+        let mut scored: Vec<(i64, f32)> = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((id, blob))
+            })
+            .map_err(|e| format!("Query error: {e}"))?
+            .filter_map(|r| r.ok())
+            .map(|(id, blob)| {
+                let emb = bytes_to_embedding(&blob);
+                let sim = cosine_similarity(query_embedding, &emb);
+                (id, sim)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(top_k);
+        Ok(scored)
     }
 }
