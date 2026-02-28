@@ -17,12 +17,16 @@ interface PdfViewerProps {
   title: string;
   /** Called when the user closes the viewer */
   onClose: () => void;
+  /** Page to open on when the viewer mounts */
+  initialPage?: number;
+  /** Called whenever the visible page changes */
+  onPageChange?: (page: number) => void;
 }
 
-export default function PdfViewer({ pdfData, title, onClose }: PdfViewerProps) {
+export default function PdfViewer({ pdfData, title, onClose, initialPage, onPageChange }: PdfViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [pdfDoc, setPdfDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
-  const [currentPage, setCurrentPage] = useState(1);
+  const [currentPage, setCurrentPage] = useState(initialPage ?? 1);
   const [totalPages, setTotalPages] = useState(0);
   const [scale, setScale] = useState(1.2);
   const [loading, setLoading] = useState(true);
@@ -30,6 +34,7 @@ export default function PdfViewer({ pdfData, title, onClose }: PdfViewerProps) {
   const [renderedPages, setRenderedPages] = useState<Set<number>>(new Set());
   const canvasRefs = useRef<Map<number, HTMLCanvasElement>>(new Map());
   const renderTasksRef = useRef<Map<number, pdfjsLib.RenderTask>>(new Map());
+  const didInitialScroll = useRef(false);
 
   // Load the PDF document
   useEffect(() => {
@@ -52,7 +57,7 @@ export default function PdfViewer({ pdfData, title, onClose }: PdfViewerProps) {
         if (!cancelled) {
           setPdfDoc(doc);
           setTotalPages(doc.numPages);
-          setCurrentPage(1);
+          setCurrentPage(initialPage && initialPage <= doc.numPages ? initialPage : 1);
           setRenderedPages(new Set());
           setLoading(false);
         }
@@ -68,7 +73,7 @@ export default function PdfViewer({ pdfData, title, onClose }: PdfViewerProps) {
     return () => {
       cancelled = true;
     };
-  }, [pdfData]);
+  }, [pdfData, initialPage]);
 
   // Render a single page to its canvas
   const renderPage = useCallback(
@@ -136,6 +141,17 @@ export default function PdfViewer({ pdfData, title, onClose }: PdfViewerProps) {
     };
   }, [pdfDoc, scale, renderPage]);
 
+  // Scroll to the initial page after its canvas has been rendered
+  useEffect(() => {
+    const target = initialPage ?? 1;
+    if (didInitialScroll.current || target <= 1 || !renderedPages.has(target)) return;
+    const canvas = canvasRefs.current.get(target);
+    if (canvas) {
+      canvas.scrollIntoView({ behavior: "instant", block: "start" });
+      didInitialScroll.current = true;
+    }
+  }, [renderedPages, initialPage]);
+
   // Track current page from scroll position
   const handleScroll = useCallback(() => {
     const container = containerRef.current;
@@ -163,6 +179,13 @@ export default function PdfViewer({ pdfData, title, onClose }: PdfViewerProps) {
 
     setCurrentPage(closestPage);
   }, [totalPages]);
+
+  // Report page changes to the parent
+  useEffect(() => {
+    if (currentPage > 0 && onPageChange) {
+      onPageChange(currentPage);
+    }
+  }, [currentPage, onPageChange]);
 
   // Zoom handlers
   const zoomIn = () => setScale((s) => Math.min(s + 0.25, 4.0));

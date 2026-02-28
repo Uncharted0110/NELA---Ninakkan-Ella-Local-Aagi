@@ -109,8 +109,11 @@ function App() {
   const [pdfViewerData, setPdfViewerData] = useState<{
     data: string;
     title: string;
+    filePath: string;
   } | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
+  /** Remembered page number per document file path. */
+  const [pdfPageMap, setPdfPageMap] = useState<Record<string, number>>({});
 
   // ── Document Viewer state (non-PDF formats) ────────────────────────────
   const [docViewerFile, setDocViewerFile] = useState<{
@@ -311,12 +314,16 @@ function App() {
   const openDocViewer = async (doc: IngestionStatus) => {
     const ext = doc.file_path.split(".").pop()?.toLowerCase() || "";
 
+    // Close any previously open viewer so documents don't overlay
+    setDocViewerFile(null);
+    setPdfViewerData(null);
+
     if (ext === "pdf") {
       // PDF uses the dedicated PdfViewer
       try {
         setPdfLoading(true);
         const data = await Api.readFileBase64(doc.file_path);
-        setPdfViewerData({ data, title: doc.title });
+        setPdfViewerData({ data, title: doc.title, filePath: doc.file_path });
       } catch (e) {
         console.error("Failed to load PDF:", e);
         alert(`Failed to open PDF: ${e}`);
@@ -892,6 +899,10 @@ function App() {
             pdfData={pdfViewerData.data}
             title={pdfViewerData.title}
             onClose={closePdfViewer}
+            initialPage={pdfPageMap[pdfViewerData.filePath]}
+            onPageChange={(page) =>
+              setPdfPageMap((prev) => ({ ...prev, [pdfViewerData.filePath]: page }))
+            }
           />
         )}
 
