@@ -62,7 +62,7 @@ jobs:
         shell: pwsh
         run: |
           $bundleDir = "genhat-desktop/src-tauri/target/release/bundle"
-          $file = Get-ChildItem -Path "$bundleDir/nsis","$bundleDir/msi" -Include *.exe,*.msi -ErrorAction SilentlyContinue | Select-Object -First 1
+          $file = Get-ChildItem -Path $bundleDir -Recurse -Include "*.exe","*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
           echo "ARTIFACT_PATH=$($file.FullName)" >> $env:GITHUB_ENV
           echo "ARTIFACT_NAME=$($file.Name)" >> $env:GITHUB_ENV
 
