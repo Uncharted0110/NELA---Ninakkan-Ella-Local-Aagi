@@ -1,7 +1,16 @@
-name: Tauri Multi-Platform Build & Upload
+name: Tauri Multi-Platform Build & Release
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version tag (e.g. v0.1.0)"
+        required: true
+        default: "v0.1.0"
+      release_name:
+        description: "Release title"
+        required: false
+        default: "GenHat Release"
 
 jobs:
   build:
@@ -11,16 +20,16 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            drive_folder: Windows
           # - os: ubuntu-latest
-          #   drive_folder: Linux
           # - os: macos-latest
-          #   drive_folder: Mac
 
     runs-on: ${{ matrix.os }}
 
     env:
       NODE_VERSION: 20
+
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Repository
@@ -56,16 +65,19 @@ jobs:
         run: npx tauri build
         working-directory: genhat-desktop
 
-      # Locate Build Artifact (Windows) — installer only, from bundle/nsis and bundle/msi
-      - name: Locate Build Artifact (Windows)
+      # Locate Build Artifacts (Windows) — only GenHat .msi and .exe installers
+      - name: Locate Build Artifacts (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           $bundleDir = Join-Path $env:GITHUB_WORKSPACE "genhat-desktop/src-tauri/target/release/bundle"
-          $file = Get-ChildItem -Path $bundleDir -Recurse -Include "*.exe","*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $file) { Write-Error "No installer found in $bundleDir"; exit 1 }
-          echo "ARTIFACT_PATH=$($file.FullName)" >> $env:GITHUB_ENV
-          echo "ARTIFACT_NAME=$($file.Name)" >> $env:GITHUB_ENV
+          $files = Get-ChildItem -Path $bundleDir -Recurse -Include "*.msi","*.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like "GenHat*" }
+          if (-not $files) { Write-Error "No GenHat installers found in $bundleDir"; exit 1 }
+          $paths = ($files | ForEach-Object { $_.FullName }) -join "`n"
+          echo "ARTIFACT_PATHS<<EOF" >> $env:GITHUB_ENV
+          echo $paths >> $env:GITHUB_ENV
+          echo "EOF" >> $env:GITHUB_ENV
 
       # - name: Locate Build Artifact (Linux)
       #   if: matrix.os == 'ubuntu-latest'
@@ -77,31 +89,16 @@ jobs:
       # - name: Locate Build Artifact (macOS)
       #   if: matrix.os == 'macos-latest'
       #   run: |
-      #     FILE=$(find genhat-desktop/src-tauri/target/release -type f \( -name "*.dmg" -o -name "*.app" \) | head -n 1)
+      #     FILE=$(find genhat-desktop/src-tauri/target/release -type f \( -name "*.dmg" \) | head -n 1)
       #     echo "ARTIFACT_PATH=$FILE" >> $GITHUB_ENV
       #     echo "ARTIFACT_NAME=$(basename $FILE)" >> $GITHUB_ENV
 
-      # Setup rclone for Google Drive
-      - name: Install rclone (Windows)
-        if: matrix.os == 'windows-latest'
-        run: choco install rclone -y
-
-      # - name: Install rclone (Linux)
-      #   if: matrix.os == 'ubuntu-latest'
-      #   run: sudo apt install -y rclone
-
-      # - name: Install rclone (macOS)
-      #   if: matrix.os == 'macos-latest'
-      #   run: brew install rclone
-
-      - name: Configure rclone
-        run: |
-          echo '${{ secrets.GDRIVE_SERVICE_ACCOUNT }}' > service-account.json
-          rclone config create gdrive drive `
-            scope=drive.file `
-            service_account_file=service-account.json
-
-      # Upload to Google Drive — AppFiles/Releases/<OS>
-      - name: Upload to Google Drive
-        run: |
-          rclone copy "${{ env.ARTIFACT_PATH }}" "gdrive:${{ vars.DRIVE_BASE_PATH }}/${{ matrix.drive_folder }}" --progress
+      # Upload artifacts to GitHub Release (creates the release if it doesn't exist)
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          name: ${{ github.event.inputs.release_name }}
+          draft: false
+          prerelease: false
+          files: ${{ env.ARTIFACT_PATHS }}
