@@ -20,8 +20,11 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-          # - os: ubuntu-latest
+            os_label: Windows
+          - os: ubuntu-latest
+            os_label: Linux
           # - os: macos-latest
+          #   os_label: macOS
 
     runs-on: ${{ matrix.os }}
 
@@ -50,15 +53,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       # Linux System Dependencies
-      # - name: Install Linux Dependencies
-      #   if: matrix.os == 'ubuntu-latest'
-      #   run: |
-      #     sudo apt update
-      #     sudo apt install -y \
-      #       libwebkit2gtk-4.1-dev \
-      #       libgtk-3-dev \
-      #       libayatana-appindicator3-dev \
-      #       librsvg2-dev
+      - name: Install Linux Dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
 
       # Build Tauri
       - name: Build Tauri App
@@ -79,26 +82,33 @@ jobs:
           echo $paths >> $env:GITHUB_ENV
           echo "EOF" >> $env:GITHUB_ENV
 
-      # - name: Locate Build Artifact (Linux)
-      #   if: matrix.os == 'ubuntu-latest'
-      #   run: |
-      #     FILE=$(find genhat-desktop/src-tauri/target/release -type f \( -name "*.AppImage" -o -name "*.deb" \) | head -n 1)
-      #     echo "ARTIFACT_PATH=$FILE" >> $GITHUB_ENV
-      #     echo "ARTIFACT_NAME=$(basename $FILE)" >> $GITHUB_ENV
+      # Locate Build Artifacts (Linux) — .AppImage and .deb
+      - name: Locate Build Artifacts (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          BUNDLE_DIR="genhat-desktop/src-tauri/target/release/bundle"
+          FILES=$(find "$BUNDLE_DIR" -type f \( -name "*.AppImage" -o -name "*.deb" \))
+          if [ -z "$FILES" ]; then echo "No Linux installers found in $BUNDLE_DIR"; exit 1; fi
+          echo "ARTIFACT_PATHS<<EOF" >> $GITHUB_ENV
+          echo "$FILES" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
-      # - name: Locate Build Artifact (macOS)
+      # - name: Locate Build Artifacts (macOS)
       #   if: matrix.os == 'macos-latest'
       #   run: |
-      #     FILE=$(find genhat-desktop/src-tauri/target/release -type f \( -name "*.dmg" \) | head -n 1)
-      #     echo "ARTIFACT_PATH=$FILE" >> $GITHUB_ENV
-      #     echo "ARTIFACT_NAME=$(basename $FILE)" >> $GITHUB_ENV
+      #     BUNDLE_DIR="genhat-desktop/src-tauri/target/release/bundle"
+      #     FILES=$(find "$BUNDLE_DIR" -type f -name "*.dmg")
+      #     if [ -z "$FILES" ]; then echo "No macOS installer found in $BUNDLE_DIR"; exit 1; fi
+      #     echo "ARTIFACT_PATHS<<EOF" >> $GITHUB_ENV
+      #     echo "$FILES" >> $GITHUB_ENV
+      #     echo "EOF" >> $GITHUB_ENV
 
-      # Upload artifacts to GitHub Release (creates the release if it doesn't exist)
+      # Upload to a per-OS GitHub Release
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.version }}
-          name: ${{ github.event.inputs.release_name }}
+          tag_name: ${{ github.event.inputs.version }}-${{ matrix.os_label }}
+          name: "${{ github.event.inputs.release_name }} — ${{ matrix.os_label }}"
           draft: false
           prerelease: false
           files: ${{ env.ARTIFACT_PATHS }}
