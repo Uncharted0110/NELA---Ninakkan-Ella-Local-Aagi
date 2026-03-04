@@ -21,10 +21,13 @@ jobs:
         include:
           - os: windows-latest
             os_label: Windows
+            bundles: msi,nsis
           - os: ubuntu-latest
             os_label: Linux
+            bundles: deb
           # - os: macos-latest
           #   os_label: macOS
+          #   bundles: dmg
 
     runs-on: ${{ matrix.os }}
 
@@ -65,9 +68,7 @@ jobs:
 
       # Build Tauri
       - name: Build Tauri App
-        env:
-          APPIMAGE_EXTRACT_AND_RUN: "1"
-        run: npx tauri build
+        run: npx tauri build --bundles ${{ matrix.bundles }}
         working-directory: genhat-desktop
 
       # Locate Build Artifacts (Windows) — only GenHat .msi and .exe installers
