@@ -5,6 +5,7 @@ import {
   MessageSquare,
   Eye,
   Volume2,
+  Mic,
   Plus,
   ImageIcon,
   X,
@@ -31,6 +32,7 @@ import ChatWindow from "./components/ChatWindow";
 import ModelSelector from "./components/ModelSelector";
 import PdfViewer from "./components/PdfViewer";
 import DocumentViewer from "./components/DocumentViewer";
+import PodcastTab from "./components/PodcastTab";
 import "./App.css";
 
 /** Extensions the DocumentViewer can render (non-PDF). */
@@ -64,6 +66,7 @@ const MODE_CONFIG: {
   { mode: "text", label: "Chat", icon: MessageSquare, desc: "Text conversation" },
   { mode: "vision", label: "Vision", icon: Eye, desc: "Image analysis" },
   { mode: "audio", label: "Audio", icon: Volume2, desc: "Text to speech" },
+  { mode: "podcast", label: "Podcast", icon: Mic, desc: "AI podcast generation" },
 ];
 
 function App() {
@@ -716,6 +719,8 @@ function App() {
         return "Ask about the image (e.g., 'What's in this image?')";
       case "audio":
         return "Type text to generate speech...";
+      case "podcast":
+        return "What topic should the podcast cover?";
       default:
         return ragDocs.length > 0
           ? "Ask about your documents or chat freely..."
@@ -913,7 +918,11 @@ function App() {
 
         {/* ── RAG Panel ── now in right sidebar */}
 
-        {/* ── Chat Area ── */}
+        {/* ── Podcast Mode ── */}
+        {chatMode === "podcast" ? (
+          <PodcastTab hasDocuments={ragDocs.length > 0} />
+        ) : (
+        /* ── Chat Area ── */
         <ChatWindow
           messages={messages}
           streamingContent={streamingContent}
@@ -933,6 +942,7 @@ function App() {
           showRagControls={chatMode === "text"}
           docPanelOpen={docPanelOpen}
         />
+        )}
 
         {/* ── PDF Viewer Overlay ── */}
         {pdfLoading && (

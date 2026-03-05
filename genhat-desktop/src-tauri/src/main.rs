@@ -128,6 +128,8 @@ fn main() {
             // File viewer commands
             app_lib::commands::rag::read_file_base64,
             app_lib::commands::rag::read_file_text,
+            // Podcast commands
+            app_lib::commands::podcast::generate_podcast,
         ])
         .build(tauri::generate_context!())
         .expect("error building tauri app")

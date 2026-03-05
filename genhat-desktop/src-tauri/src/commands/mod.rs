@@ -6,3 +6,4 @@ pub mod models;
 pub mod inference;
 pub mod audio;
 pub mod rag;
+pub mod podcast;

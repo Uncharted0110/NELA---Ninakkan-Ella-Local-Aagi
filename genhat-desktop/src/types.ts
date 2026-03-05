@@ -62,7 +62,7 @@ export interface MediaAsset {
   caption_hash: string | null;
 }
 
-export type ChatMode = "text" | "vision" | "audio" | "rag";
+export type ChatMode = "text" | "vision" | "audio" | "rag" | "podcast";
 
 /** Available KittenTTS voice names. */
 export const KITTEN_TTS_VOICES = [
@@ -85,3 +85,46 @@ export interface ChatCompletionRequest {
   temperature?: number;
   stream?: boolean;
 }
+
+// ── Podcast Types ─────────────────────────────────────────────────────────────
+
+export interface PodcastRequest {
+  query: string;
+  voice_a: string;
+  voice_b: string;
+  speaker_a_name: string;
+  speaker_b_name: string;
+  max_turns: number;
+  top_k?: number;
+}
+
+export interface PodcastLine {
+  speaker: string;
+  voice: string;
+  text: string;
+  index: number;
+}
+
+export interface PodcastScript {
+  title: string;
+  lines: PodcastLine[];
+  source_chunks: string[];
+}
+
+export interface PodcastSegment {
+  line: PodcastLine;
+  audio_data_url: string;
+}
+
+export interface PodcastResult {
+  script: PodcastScript;
+  segments: PodcastSegment[];
+  combined_audio_data_url: string;
+}
+
+export interface PodcastProgress {
+  stage: "rag" | "scripting" | "tts" | "merging" | "done";
+  detail: string;
+  progress: number;
+}
+

@@ -7,6 +7,8 @@ import type {
   RagResult,
   RagStreamSetup,
   MediaAsset,
+  PodcastRequest,
+  PodcastResult,
 } from "./types";
 
 export const Api = {
@@ -156,6 +158,13 @@ export const Api = {
   /** Read a text-based file and return its content as a string. */
   async readFileText(path: string): Promise<string> {
     return invoke<string>("read_file_text", { path });
+  },
+
+  // ── Podcast ────────────────────────────────────────────────────────────────
+
+  /** Generate a podcast from a RAG query with two-person dialogue + TTS. */
+  async generatePodcast(request: PodcastRequest): Promise<PodcastResult> {
+    return invoke<PodcastResult>("generate_podcast", { request });
   },
 
   /** Manually trigger a round of background enrichment. */
