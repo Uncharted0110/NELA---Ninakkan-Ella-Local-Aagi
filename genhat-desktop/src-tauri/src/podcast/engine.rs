@@ -67,12 +67,19 @@ pub async fn generate_podcast(
     );
 
     // Send as a Chat task — the backend wraps it in system/user messages
+    // Set high max_tokens so the LLM can produce all requested dialogue turns.
+    // ~60 tokens per turn × max_turns, plus JSON overhead. Minimum 1024.
+    let needed_tokens = (request.max_turns * 80).max(1024);
+    let mut extra = HashMap::new();
+    extra.insert("max_tokens".to_string(), needed_tokens.to_string());
+    extra.insert("temperature".to_string(), "0.7".to_string());
+
     let chat_request = TaskRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
         task_type: TaskType::Chat,
         input: prompt,
         model_override: None,
-        extra: HashMap::new(),
+        extra,
     };
 
     let script_text = match router.route(&chat_request).await {
@@ -98,6 +105,14 @@ pub async fn generate_podcast(
 
     if lines.is_empty() {
         return Err("LLM generated an empty script".to_string());
+    }
+
+    if lines.len() < request.max_turns {
+        log::warn!(
+            "[podcast] Requested {} dialogue lines but LLM only produced {} (output may have been truncated)",
+            request.max_turns,
+            lines.len()
+        );
     }
 
     let script = PodcastScript {

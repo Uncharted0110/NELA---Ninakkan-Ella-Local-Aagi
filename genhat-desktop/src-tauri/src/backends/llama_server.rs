@@ -307,7 +307,7 @@ impl ModelBackend for LlamaServerBackend {
             })
         };
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": "local",
             "messages": [
                 { "role": "system", "content": system_prompt },
@@ -315,6 +315,20 @@ impl ModelBackend for LlamaServerBackend {
             ],
             "stream": false
         });
+
+        // Allow callers to override max_tokens via the extra map
+        if let Some(mt) = request.extra.get("max_tokens") {
+            if let Ok(n) = mt.parse::<u32>() {
+                body["max_tokens"] = serde_json::json!(n);
+            }
+        }
+
+        // Allow callers to override temperature via the extra map
+        if let Some(t) = request.extra.get("temperature") {
+            if let Ok(v) = t.parse::<f64>() {
+                body["temperature"] = serde_json::json!(v);
+            }
+        }
 
         let client = reqwest::Client::new();
         let resp = client

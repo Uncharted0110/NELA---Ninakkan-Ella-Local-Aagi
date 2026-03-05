@@ -18,18 +18,22 @@ pub fn build_script_prompt(
     format!(
         r#"Write a podcast dialogue between two hosts: {speaker_a} and {speaker_b}.
 
-{speaker_a} is the curious interviewer. {speaker_b} is the knowledgeable expert.
-Write exactly {max_turns} lines, alternating between {speaker_a} and {speaker_b}.
-Base ALL content on the CONTEXT below. Do not invent facts.
-Keep each line conversational, 1-3 sentences.
-Start with {speaker_a} introducing the topic. End with {speaker_b} wrapping up.
+RULES:
+1. {speaker_a} is the curious interviewer. {speaker_b} is the knowledgeable expert.
+2. You MUST write EXACTLY {max_turns} dialogue lines. Not fewer, not more.
+3. Alternate speakers: {speaker_a}, {speaker_b}, {speaker_a}, {speaker_b}, ...
+4. Base ALL content on the CONTEXT below. Do not invent facts.
+5. Keep each line conversational, 1-3 sentences.
+6. Start with {speaker_a} introducing the topic. End with {speaker_b} wrapping up.
+7. Respond with ONLY a valid JSON array. No markdown, no extra text.
 
 CONTEXT:
 {rag_context}
 
 TOPIC: {query}
 
-Respond with ONLY a JSON array, no other text:
+IMPORTANT: Output EXACTLY {max_turns} items in the JSON array.
+JSON format (produce {max_turns} entries):
 [{{"speaker":"{speaker_a}","text":"..."}},{{"speaker":"{speaker_b}","text":"..."}}]"#
     )
 }
@@ -105,6 +109,8 @@ pub fn parse_script_response(
 /// - Markdown fences: ` ```json\n[...]\n``` `
 /// - Prefix/suffix text around the array
 /// - Nested brackets (finds the outermost balanced pair)
+/// - **Truncated output** — if the LLM ran out of tokens mid-JSON,
+///   we find the last complete object `}` and close the array there.
 fn extract_json_array(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
 
@@ -141,17 +147,79 @@ fn extract_json_array(raw: &str) -> Result<String, String> {
     match end_pos {
         Some(end) => Ok(trimmed[start..=end].to_string()),
         None => {
-            // Fallback: try rfind for the last ']'
-            if let Some(end) = trimmed.rfind(']') {
-                if end > start {
-                    return Ok(trimmed[start..=end].to_string());
+            // The JSON array is truncated (LLM ran out of tokens).
+            // Try to salvage all complete objects by finding the last '}' that
+            // closes top-level array entries, then appending ']'.
+            log::warn!(
+                "[podcast] JSON array is truncated — attempting repair. Raw length={}",
+                trimmed.len()
+            );
+            try_repair_truncated_array(&trimmed[start..])
+        }
+    }
+}
+
+/// Attempt to repair a truncated JSON array by keeping only complete objects.
+///
+/// Walks through the array tracking brace depth. Each time we return to
+/// depth-1 (i.e. top-level array) after a `}`, we record that as the last
+/// safe cut point. We slice up to there and close with `]`.
+fn try_repair_truncated_array(array_str: &str) -> Result<String, String> {
+    let mut depth = 0i32;          // overall bracket/brace depth
+    let mut last_complete_end = None; // byte index of last complete top-level `}`
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for (i, ch) in array_str.char_indices() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+        if ch == '\\' && in_string {
+            escape_next = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+
+        match ch {
+            '[' | '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                // depth == 1 means we just closed a top-level object inside the array
+                if depth == 1 {
+                    last_complete_end = Some(i);
                 }
             }
-            Err(format!(
-                "No closing bracket found in LLM response (first 200 chars): {}",
-                &trimmed[..trimmed.len().min(200)]
-            ))
+            ']' => {
+                depth -= 1;
+            }
+            _ => {}
         }
+    }
+
+    if let Some(end) = last_complete_end {
+        // Slice everything up to and including the last complete `}`
+        let mut repaired = array_str[..=end].to_string();
+        // Remove any trailing comma + whitespace before closing
+        let trimmed_tail = repaired.trim_end().trim_end_matches(',').to_string();
+        let result = format!("{}]", trimmed_tail);
+        log::info!(
+            "[podcast] Repaired truncated JSON — kept {} chars out of {}",
+            result.len(),
+            array_str.len()
+        );
+        Ok(result)
+    } else {
+        Err(format!(
+            "No complete dialogue entries found in truncated LLM output (first 300 chars): {}",
+            &array_str[..array_str.len().min(300)]
+        ))
     }
 }
 
@@ -184,5 +252,25 @@ mod tests {
         assert_eq!(lines[0].voice, "Leo");
         assert_eq!(lines[1].speaker, "Sam");
         assert_eq!(lines[1].voice, "Bella");
+    }
+
+    #[test]
+    fn test_extract_truncated_json_repairs() {
+        // Simulates LLM running out of tokens mid-sentence
+        let input = r#"[{"speaker":"Alex","text":"Hello there!"},{"speaker":"Sam","text":"Welcome to the show!"},{"speaker":"Alex","text":"So tell me about thi"#;
+        let result = extract_json_array(input).unwrap();
+        // Should keep the first two complete objects
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0]["speaker"], "Alex");
+        assert_eq!(parsed[1]["speaker"], "Sam");
+    }
+
+    #[test]
+    fn test_extract_truncated_with_trailing_comma() {
+        let input = r#"[{"speaker":"A","text":"One"},{"speaker":"B","text":"Two"},"#;
+        let result = extract_json_array(input).unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed.len(), 2);
     }
 }
