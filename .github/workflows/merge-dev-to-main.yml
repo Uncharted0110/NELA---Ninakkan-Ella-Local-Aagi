@@ -47,3 +47,11 @@ jobs:
         with:
           name: release-version
           path: version.txt
+
+  trigger-build:
+    needs: promote
+    uses: ./.github/workflows/tauri-multi-build.yml
+    with:
+      version: ${{ github.event.inputs.version }}
+      release_name: ${{ github.event.inputs.release_name }}
+    secrets: inherit
