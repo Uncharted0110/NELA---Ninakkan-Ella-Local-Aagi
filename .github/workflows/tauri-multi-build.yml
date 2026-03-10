@@ -3,7 +3,7 @@ name: Tauri Multi-Platform Build & Release
 on:
   push:
     tags:
-      - "v*
+      - "v*"
 
 jobs:
   build:
