@@ -1,13 +1,16 @@
 name: Tauri Multi-Platform Build & Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_run:
+    workflows: ["Promote Dev to Main"]
+    types:
+      - completed
 
 jobs:
   build:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     name: Build on ${{ matrix.os }}
+
     strategy:
       fail-fast: false
       matrix:
@@ -33,6 +36,15 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+
+      - name: Get latest tag
+        id: tag
+        run: |
+          git fetch --tags
+          TAG=$(git describe --tags --abbrev=0)
+          echo "TAG=$TAG" >> $GITHUB_ENV
 
       # Setup Node
       - name: Setup Node
@@ -64,7 +76,7 @@ jobs:
         run: npx tauri build --bundles ${{ matrix.bundles }}
         working-directory: genhat-desktop
 
-      # Locate Build Artifacts (Windows) — only GenHat .msi and .exe installers
+      # Locate Windows installers
       - name: Locate Build Artifacts (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
@@ -78,7 +90,7 @@ jobs:
           echo $paths >> $env:GITHUB_ENV
           echo "EOF" >> $env:GITHUB_ENV
 
-      # Locate Build Artifacts (Linux) — .AppImage and .deb
+      # Locate Linux installers
       - name: Locate Build Artifacts (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -89,49 +101,35 @@ jobs:
           echo "$FILES" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      # - name: Locate Build Artifacts (macOS)
-      #   if: matrix.os == 'macos-latest'
-      #   run: |
-      #     BUNDLE_DIR="genhat-desktop/src-tauri/target/release/bundle"
-      #     FILES=$(find "$BUNDLE_DIR" -type f -name "*.dmg")
-      #     if [ -z "$FILES" ]; then echo "No macOS installer found in $BUNDLE_DIR"; exit 1; fi
-      #     echo "ARTIFACT_PATHS<<EOF" >> $GITHUB_ENV
-      #     echo "$FILES" >> $GITHUB_ENV
-      #     echo "EOF" >> $GITHUB_ENV
-
-      # Upload to a per-OS GitHub Release
+      # Upload Release Assets
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.version }}-${{ matrix.os_label }}
-          name: "${{ github.event.inputs.release_name }} — ${{ matrix.os_label }}"
-          draft: false
-          prerelease: false
+          tag_name: ${{ env.TAG }}
           files: ${{ env.ARTIFACT_PATHS }}
-          
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   trigger-vercel-deploy:
     name: Trigger Vercel Deploy
-    needs: build # This ensures it waits for the OS matrix builds to finish successfully
+    needs: build
     runs-on: ubuntu-latest
+
     steps:
       - name: Call Vercel Deploy Hook with Retries
         run: |
-          # Loop 4 times total (1 initial attempt + 3 retries)
           for i in 1 2 3 4; do
             echo "Attempt $i to trigger Vercel..."
-            
-            # -f: Fail on HTTP errors
-            # -sS: Silent progress bar, but show errors if it fails
             if curl -f -sS -X POST "${{ secrets.VERCEL_DEPLOY_HOOK }}"; then
-              echo -e "\nSuccessfully triggered Vercel deploy!"
+              echo "Successfully triggered Vercel deploy!"
               exit 0
             fi
-            
+
             if [ $i -lt 4 ]; then
               echo "Attempt $i failed. Retrying in 10 seconds..."
               sleep 10
             fi
           done
-          
+
           echo "All attempts to trigger Vercel failed."
           exit 1
