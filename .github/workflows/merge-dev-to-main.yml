@@ -36,6 +36,8 @@ jobs:
 
       - name: Create release tag
         run: |
+          git tag -d ${{ github.event.inputs.version }} 2>/dev/null || true
+          git push origin :refs/tags/${{ github.event.inputs.version }} 2>/dev/null || true
           git tag ${{ github.event.inputs.version }}
           git push origin ${{ github.event.inputs.version }}
       
