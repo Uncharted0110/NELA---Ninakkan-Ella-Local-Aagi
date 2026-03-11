@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, memo } from "react";
 import MarkdownRenderer from "./MarkdownRenderer";
+import AudioPlayer from "./AudioPlayer";
 import { Api } from "../api";
 import type { ChatMessage, MediaAsset, IngestionStatus } from "../types";
 
@@ -408,7 +409,7 @@ const ChatWindow: React.FC<ChatWindowProps> = memo(({
             {ttsGenerationTime !== null && (
               <div className="text-[0.72rem] text-txt-muted mb-1">Generated in {ttsGenerationTime.toFixed(1)}s</div>
             )}
-            <audio controls src={audioSrc} autoPlay className="w-full h-9 rounded-lg" />
+            <AudioPlayer src={audioSrc} autoPlay />
           </div>
         )}
 
