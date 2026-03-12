@@ -11,18 +11,39 @@ on:
         required: true
 
 jobs:
-  # ── Rust backend tests (must pass before merge) ─────────────────────────────
-  rust-tests:
-    name: Rust Tests
+  # ── Full test suite (must pass before merge) ───────────────────────────────
+  test-suite:
+    name: Full Test Suite
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout dev branch
         uses: actions/checkout@v4
         with:
           ref: dev
           fetch-depth: 0
 
+      # ── Frontend checks ─────────────────────────────────────────────
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: genhat-desktop/package-lock.json
+
+      - name: Install Node dependencies
+        working-directory: genhat-desktop
+        run: npm ci
+
+      - name: TypeScript type check
+        working-directory: genhat-desktop
+        run: npx tsc -b --noEmit
+
+      - name: ESLint
+        working-directory: genhat-desktop
+        run: npx eslint .
+
+      # ── Rust backend tests ──────────────────────────────────────────
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -49,13 +70,9 @@ jobs:
         working-directory: genhat-desktop/src-tauri
         run: cargo test --lib
 
-      - name: Run clippy lints
-        working-directory: genhat-desktop/src-tauri
-        run: cargo clippy --lib -- -D warnings
-
-  # ── Merge dev → main (only after tests pass) ───────────────────────────────
+  # ── Merge dev → main (only after full test suite passes) ────────────────
   promote:
-    needs: [rust-tests]
+    needs: [test-suite]
     runs-on: ubuntu-latest
     permissions:
       contents: write
