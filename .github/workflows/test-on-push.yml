@@ -1,0 +1,53 @@
+name: Push Checks
+
+on:
+  push:
+    branches: ["**"]
+
+concurrency:
+  group: push-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Frontend checks (every push) ──────────────────────────────────────────
+  frontend-checks:
+    name: Frontend Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: genhat-desktop/package-lock.json
+
+      - name: Install dependencies
+        working-directory: genhat-desktop
+        run: npm ci
+
+      - name: TypeScript type check
+        working-directory: genhat-desktop
+        run: npx tsc -b --noEmit
+
+      - name: ESLint
+        working-directory: genhat-desktop
+        run: npx eslint .
+
+  # ── Gate job ────────────────────────────────────────────────────────────────
+  push-ci:
+    name: Push CI ✅
+    if: always()
+    needs: [frontend-checks]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all jobs
+        run: |
+          if [[ "${{ needs.frontend-checks.result }}" != "success" ]]; then
+            echo "❌ frontend-checks failed"
+            exit 1
+          fi
+          echo "✅ Push checks passed"

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, memo } from "react";
 import MarkdownRenderer from "./MarkdownRenderer";
+import AudioPlayer from "./AudioPlayer";
 import { Api } from "../api";
 import type { ChatMessage, MediaAsset, IngestionStatus } from "../types";
 
@@ -162,10 +163,12 @@ const ChatWindow: React.FC<ChatWindowProps> = memo(({
   const endRef = useRef<HTMLDivElement>(null);
 
   /** Tracks the number of messages that have already been rendered and animated.
-   *  Only messages at index >= this value get the entrance animation. */
-  const prevMsgCountRef = useRef(0);
+   *  Only messages at index >= this value get the entrance animation.
+   *  We use state (not a ref) so ESLint doesn't flag .current reads during render. */
+  const [prevMsgCount, setPrevMsgCount] = useState(0);
   useEffect(() => {
-    prevMsgCountRef.current = messages.length;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional: track previous render's msg count
+    setPrevMsgCount(messages.length);
   }, [messages.length]);
 
   useEffect(() => {
@@ -316,7 +319,7 @@ const ChatWindow: React.FC<ChatWindowProps> = memo(({
     <div className="flex-1 flex flex-col min-h-0">
       <div className="messages-area flex-1 overflow-y-auto px-6 py-4">
         {messages.map((msg, idx) => {
-          const isNew = idx >= prevMsgCountRef.current;
+          const isNew = idx >= prevMsgCount;
           return (
           <div key={idx} className={`${isNew ? "animate-msg-fade" : ""} flex gap-3 mb-6 max-w-3xl mx-auto ${msg.role === "user" ? "flex-row-reverse" : ""}`}>
             {msg.role === "user" ? (
@@ -408,7 +411,7 @@ const ChatWindow: React.FC<ChatWindowProps> = memo(({
             {ttsGenerationTime !== null && (
               <div className="text-[0.72rem] text-txt-muted mb-1">Generated in {ttsGenerationTime.toFixed(1)}s</div>
             )}
-            <audio controls src={audioSrc} autoPlay className="w-full h-9 rounded-lg" />
+            <AudioPlayer src={audioSrc} autoPlay />
           </div>
         )}
 

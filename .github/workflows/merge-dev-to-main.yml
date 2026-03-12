@@ -11,7 +11,68 @@ on:
         required: true
 
 jobs:
+  # ── Full test suite (must pass before merge) ───────────────────────────────
+  test-suite:
+    name: Full Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout dev branch
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      # ── Frontend checks ─────────────────────────────────────────────
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: genhat-desktop/package-lock.json
+
+      - name: Install Node dependencies
+        working-directory: genhat-desktop
+        run: npm ci
+
+      - name: TypeScript type check
+        working-directory: genhat-desktop
+        run: npx tsc -b --noEmit
+
+      - name: ESLint
+        working-directory: genhat-desktop
+        run: npx eslint .
+
+      # ── Rust backend tests ──────────────────────────────────────────
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            genhat-desktop/src-tauri/target
+          key: rust-${{ runner.os }}-${{ hashFiles('genhat-desktop/src-tauri/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Run cargo test
+        working-directory: genhat-desktop/src-tauri
+        run: cargo test --lib
+
+  # ── Merge dev → main (only after full test suite passes) ────────────────
   promote:
+    needs: [test-suite]
     runs-on: ubuntu-latest
     permissions:
       contents: write
