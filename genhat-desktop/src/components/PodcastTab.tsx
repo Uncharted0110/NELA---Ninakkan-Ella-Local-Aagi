@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, type ElementType } from "react";
+import { MessageSquare, Eye, Volume2, Mic, FileText } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { Api } from "../api";
 import type {
@@ -9,6 +10,14 @@ import type {
   ChatMode,
 } from "../types";
 import { KITTEN_TTS_VOICES } from "../types";
+
+const MODE_ICON_MAP: Record<ChatMode, ElementType> = {
+  text: MessageSquare,
+  vision: Eye,
+  audio: Volume2,
+  rag: FileText,
+  podcast: Mic,
+};
 
 interface PodcastTabProps {
   /** Whether the knowledge base has any ingested documents */
@@ -37,6 +46,8 @@ const PodcastTab: React.FC<PodcastTabProps> = ({
   const [activeLine, setActiveLine] = useState<number>(-1);
   const [isPlaying, setIsPlaying] = useState(false);
   const [showModeMenu, setShowModeMenu] = useState(false);
+  const currentModeLabel = modeOptions.find((option) => option.mode === currentMode)?.label ?? "Mode";
+  const CurrentModeIcon = MODE_ICON_MAP[currentMode] ?? MessageSquare;
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const modeMenuRef = useRef<HTMLDivElement>(null);
@@ -269,8 +280,8 @@ const PodcastTab: React.FC<PodcastTabProps> = ({
               title="Switch mode"
               disabled={isGenerating}
             >
-              <img src="/logo-dark.png" alt="Modes" className="w-[18px] h-[18px] object-contain" draggable={false} />
-              <span className="text-[0.74rem] font-medium leading-none">Mode</span>
+              <CurrentModeIcon size={16} strokeWidth={1.9} />
+              <span className="text-[0.74rem] font-medium leading-none">{currentModeLabel}</span>
             </button>
 
             {showModeMenu && (
@@ -280,12 +291,16 @@ const PodcastTab: React.FC<PodcastTabProps> = ({
                   return (
                     <button
                       key={option.mode}
-                      className={`w-full text-left py-2 px-3 rounded-lg text-sm transition-all duration-150 ${active ? "bg-neon-subtle text-neon" : "text-txt-secondary hover:bg-glass-hover hover:text-txt"}`}
+                      className={`w-full flex items-center gap-2 py-2 px-3 rounded-lg text-sm transition-all duration-150 ${active ? "bg-neon-subtle text-neon" : "text-txt-secondary hover:bg-glass-hover hover:text-txt"}`}
                       onClick={() => {
                         onSelectMode(option.mode);
                         setShowModeMenu(false);
                       }}
                     >
+                      {(() => {
+                        const OptionIcon = MODE_ICON_MAP[option.mode] ?? MessageSquare;
+                        return <OptionIcon size={15} strokeWidth={1.9} />;
+                      })()}
                       {option.label}
                     </button>
                   );

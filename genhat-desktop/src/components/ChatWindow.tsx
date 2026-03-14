@@ -1,8 +1,17 @@
 import React, { useState, useEffect, useRef, memo } from "react";
+import { MessageSquare, Eye, Volume2, Mic, FileText } from "lucide-react";
 import MarkdownRenderer from "./MarkdownRenderer";
 import AudioPlayer from "./AudioPlayer";
 import { Api } from "../api";
 import type { ChatMessage, MediaAsset, IngestionStatus, ChatMode } from "../types";
+
+const MODE_ICON_MAP: Record<ChatMode, React.ElementType> = {
+  text: MessageSquare,
+  vision: Eye,
+  audio: Volume2,
+  rag: FileText,
+  podcast: Mic,
+};
 
 /** Copy button for a full assistant response */
 const CopyMsgButton: React.FC<{ text: string }> = ({ text }) => {
@@ -272,6 +281,8 @@ const ChatWindow: React.FC<ChatWindowProps> = memo(({
   const hasMessages = messages.length > 0 || isLoading;
   const showAttachButton = showRagControls || chatMode === "vision";
   const visionFileName = visionImagePath ? visionImagePath.split(/[/\\]/).pop() ?? "image" : "image";
+  const currentModeLabel = modeOptions.find((option) => option.mode === currentMode)?.label ?? "Mode";
+  const CurrentModeIcon = MODE_ICON_MAP[currentMode] ?? MessageSquare;
 
   const renderAttachMenu = () => {
     if (chatMode === "vision") {
@@ -452,8 +463,8 @@ const ChatWindow: React.FC<ChatWindowProps> = memo(({
                 title="Switch mode"
                 disabled={isLoading}
               >
-                <img src="/logo-dark.png" alt="Modes" className="w-[18px] h-[18px] object-contain" draggable={false} />
-                <span className="text-[0.74rem] font-medium leading-none">Mode</span>
+                <CurrentModeIcon size={16} strokeWidth={1.9} />
+                <span className="text-[0.74rem] font-medium leading-none">{currentModeLabel}</span>
               </button>
 
               {showModeMenu && (
@@ -463,12 +474,16 @@ const ChatWindow: React.FC<ChatWindowProps> = memo(({
                     return (
                       <button
                         key={option.mode}
-                        className={`w-full text-left py-2 px-3 rounded-lg text-sm transition-all duration-150 ${active ? "bg-neon-subtle text-neon" : "text-txt-secondary hover:bg-glass-hover hover:text-txt"}`}
+                        className={`w-full flex items-center gap-2 py-2 px-3 rounded-lg text-sm transition-all duration-150 ${active ? "bg-neon-subtle text-neon" : "text-txt-secondary hover:bg-glass-hover hover:text-txt"}`}
                         onClick={() => {
                           onSelectMode?.(option.mode);
                           setShowModeMenu(false);
                         }}
                       >
+                        {(() => {
+                          const OptionIcon = MODE_ICON_MAP[option.mode] ?? MessageSquare;
+                          return <OptionIcon size={15} strokeWidth={1.9} />;
+                        })()}
                         {option.label}
                       </button>
                     );
@@ -728,8 +743,8 @@ const ChatWindow: React.FC<ChatWindowProps> = memo(({
               title="Switch mode"
               disabled={isLoading}
             >
-              <img src="/logo-dark.png" alt="Modes" className="w-[18px] h-[18px] object-contain" draggable={false} />
-              <span className="text-[0.74rem] font-medium leading-none">Mode</span>
+              <CurrentModeIcon size={16} strokeWidth={1.9} />
+              <span className="text-[0.74rem] font-medium leading-none">{currentModeLabel}</span>
             </button>
 
             {showModeMenu && (
@@ -739,12 +754,16 @@ const ChatWindow: React.FC<ChatWindowProps> = memo(({
                   return (
                     <button
                       key={option.mode}
-                      className={`w-full text-left py-2 px-3 rounded-lg text-sm transition-all duration-150 ${active ? "bg-neon-subtle text-neon" : "text-txt-secondary hover:bg-glass-hover hover:text-txt"}`}
+                      className={`w-full flex items-center gap-2 py-2 px-3 rounded-lg text-sm transition-all duration-150 ${active ? "bg-neon-subtle text-neon" : "text-txt-secondary hover:bg-glass-hover hover:text-txt"}`}
                       onClick={() => {
                         onSelectMode?.(option.mode);
                         setShowModeMenu(false);
                       }}
                     >
+                      {(() => {
+                        const OptionIcon = MODE_ICON_MAP[option.mode] ?? MessageSquare;
+                        return <OptionIcon size={15} strokeWidth={1.9} />;
+                      })()}
                       {option.label}
                     </button>
                   );
