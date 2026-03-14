@@ -6,15 +6,24 @@ import type {
   PodcastResult,
   PodcastProgress,
   KittenTtsVoice,
+  ChatMode,
 } from "../types";
 import { KITTEN_TTS_VOICES } from "../types";
 
 interface PodcastTabProps {
   /** Whether the knowledge base has any ingested documents */
   hasDocuments: boolean;
+  modeOptions: { mode: ChatMode; label: string }[];
+  currentMode: ChatMode;
+  onSelectMode: (mode: ChatMode) => void;
 }
 
-const PodcastTab: React.FC<PodcastTabProps> = ({ hasDocuments }) => {
+const PodcastTab: React.FC<PodcastTabProps> = ({
+  hasDocuments,
+  modeOptions,
+  currentMode,
+  onSelectMode,
+}) => {
   const [query, setQuery] = useState("");
   const [voiceA, setVoiceA] = useState<KittenTtsVoice>("Leo");
   const [voiceB, setVoiceB] = useState<KittenTtsVoice>("Bella");
@@ -27,8 +36,10 @@ const PodcastTab: React.FC<PodcastTabProps> = ({ hasDocuments }) => {
   const [error, setError] = useState<string | null>(null);
   const [activeLine, setActiveLine] = useState<number>(-1);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [showModeMenu, setShowModeMenu] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement>(null);
+  const modeMenuRef = useRef<HTMLDivElement>(null);
 
   // Listen for podcast progress events
   useEffect(() => {
@@ -44,6 +55,20 @@ const PodcastTab: React.FC<PodcastTabProps> = ({ hasDocuments }) => {
       if (unlisten) unlisten();
     };
   }, []);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (modeMenuRef.current && !modeMenuRef.current.contains(event.target as Node)) {
+        setShowModeMenu(false);
+      }
+    };
+
+    if (showModeMenu) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showModeMenu]);
 
   // Track audio playback state
   useEffect(() => {
@@ -237,6 +262,37 @@ const PodcastTab: React.FC<PodcastTabProps> = ({ hasDocuments }) => {
               }
             }}
           />
+          <div className="relative" ref={modeMenuRef}>
+            <button
+              className="glass-btn flex items-center gap-1.5 h-10 px-2.5 rounded-xl bg-glass-bg border border-glass-border text-txt-muted cursor-pointer transition-all duration-200 hover:text-neon hover:border-neon/30 hover:shadow-[0_0_10px_rgba(0,212,255,0.12)]"
+              onClick={() => setShowModeMenu((v) => !v)}
+              title="Switch mode"
+              disabled={isGenerating}
+            >
+              <img src="/logo-dark.png" alt="Modes" className="w-[18px] h-[18px] object-contain" draggable={false} />
+              <span className="text-[0.74rem] font-medium leading-none">Mode</span>
+            </button>
+
+            {showModeMenu && (
+              <div className="animate-attach-menu absolute bottom-full right-0 mb-2 w-[180px] rounded-xl bg-void-700/90 backdrop-blur-xl border border-glass-border shadow-[0_8px_32px_rgba(0,0,0,0.5)] p-1 z-50">
+                {modeOptions.map((option) => {
+                  const active = option.mode === currentMode;
+                  return (
+                    <button
+                      key={option.mode}
+                      className={`w-full text-left py-2 px-3 rounded-lg text-sm transition-all duration-150 ${active ? "bg-neon-subtle text-neon" : "text-txt-secondary hover:bg-glass-hover hover:text-txt"}`}
+                      onClick={() => {
+                        onSelectMode(option.mode);
+                        setShowModeMenu(false);
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
           <button
             onClick={handleGenerate}
             disabled={isGenerating || !query.trim() || !hasDocuments}

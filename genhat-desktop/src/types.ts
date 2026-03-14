@@ -6,6 +6,11 @@ export interface ModelFile {
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
+  /** Optional image attached to a user message in vision mode. */
+  visionImage?: {
+    path: string;
+    name: string;
+  };
   generateTime?: number;
   firstTokenTime?: number;
 }

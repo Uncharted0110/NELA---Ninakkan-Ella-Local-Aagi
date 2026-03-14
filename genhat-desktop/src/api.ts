@@ -279,6 +279,8 @@ export const Api = {
     signal?: AbortSignal
   ) {
     try {
+      const apiMessages = messages.map(({ role, content }) => ({ role, content }));
+
       const llamaPort =
         port || (await invoke<number>("get_llama_port"));
 
@@ -288,7 +290,7 @@ export const Api = {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            messages,
+            messages: apiMessages,
             stream: true,
             max_tokens: 2048,
             temperature: 0.7,

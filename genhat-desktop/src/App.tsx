@@ -6,9 +6,6 @@ import {
   Eye,
   Volume2,
   Mic,
-  Plus,
-  ImageIcon,
-  X,
   FileText,
   FolderOpen,
   Trash2,
@@ -142,6 +139,7 @@ function App() {
 
   // ── Right sidebar (Knowledge Base) ─────────────────────────────────────────
   const [docPanelOpen, setDocPanelOpen] = useState(false);
+  const [modeSwitchNotice, setModeSwitchNotice] = useState<string | null>(null);
 
   // ── Session accessor helpers ───────────────────────────────────────────────
 
@@ -495,7 +493,21 @@ function App() {
     const session = sessions.find((s) => s.id === sid);
     if (!session || session.loading) return; // Prevent concurrent requests in the same session
 
-    const newMsg: ChatMessage = { role: "user", content: text };
+    const currentVisionImagePath = chatMode === "vision" ? imagePath : null;
+
+    const visionAttachment =
+      chatMode === "vision" && currentVisionImagePath
+        ? {
+            path: currentVisionImagePath,
+            name: currentVisionImagePath.split(/[/\\]/).pop() ?? "image",
+          }
+        : undefined;
+
+    const newMsg: ChatMessage = {
+      role: "user",
+      content: text,
+      ...(visionAttachment ? { visionImage: visionAttachment } : {}),
+    };
 
     // Derive title from first user message
     const isFirstMessage = session.messages.length === 0;
@@ -509,6 +521,12 @@ function App() {
       cancelled: false,
       ...titlePatch,
     }));
+
+    // In vision mode, clear the input attachment chip after sending while
+    // preserving the image on the stored user message above.
+    if (chatMode === "vision" && currentVisionImagePath) {
+      clearImage();
+    }
 
     // Create a fresh AbortController for this session's request
     const ctrl = new AbortController();
@@ -682,7 +700,7 @@ function App() {
 
       // ── Vision Mode (streaming via Tauri events) ────────────────────────
       if (chatMode === "vision") {
-        if (!imagePath) {
+        if (!currentVisionImagePath) {
           updateSession(sid, (prev) => ({
             messages: [
               ...prev.messages,
@@ -759,7 +777,7 @@ function App() {
 
           // Start the streaming vision chat
           await Api.visionChatStream(
-            imagePath,
+            currentVisionImagePath,
             text || "What's in this image?",
             selectedVisionModel || undefined
           );
@@ -800,8 +818,12 @@ function App() {
 
       // Build the messages array from the session's messages (including the new user msg)
       const sessionMessages = session.messages;
+      const apiMessages = [...sessionMessages, newMsg].map((msg) => ({
+        role: msg.role,
+        content: msg.content,
+      }));
       Api.streamChat(
-        [...sessionMessages, newMsg],
+        apiMessages,
         (chunk) => {
           if (textFirstTokenTimeMs === null) {
             textFirstTokenTimeMs = Date.now();
@@ -870,6 +892,28 @@ function App() {
 
   // ── Derived ────────────────────────────────────────────────────────────────
 
+  const handleModeSwitch = (mode: ChatMode) => {
+    if (mode === chatMode) return;
+
+    // Preserve existing behavior: stop any active generation before switching mode.
+    if (activeSession.loading) {
+      handleCancel();
+    }
+
+    const switchedTo = MODE_CONFIG.find((m) => m.mode === mode)?.label ?? mode;
+    setModeSwitchNotice(`Switched to ${switchedTo} mode`);
+
+    if (mode !== "vision") {
+      setImagePath(null);
+      setImagePreview(null);
+    }
+    if (mode !== "text") {
+      setDocPanelOpen(false);
+    }
+
+    setChatMode(mode);
+  };
+
   const getPlaceholder = (): string => {
     switch (chatMode) {
       case "vision":
@@ -891,50 +935,6 @@ function App() {
 
   return (
     <div className="flex h-full w-full">
-      {/* ══════════ LEFT NAV SIDEBAR ══════════ */}
-      <nav className="w-[68px] bg-void-800 border-r border-glass-border flex flex-col items-center py-3 shrink-0 z-30 gap-1">
-        {/* Brand */}
-        <div className="pt-2 pb-4 mb-1">
-          <img
-            src="/logo-dark.png"
-            alt="NELA"
-            className="w-10 h-10 rounded-xl object-contain shadow-[0_4px_20px_rgba(0,212,255,0.3)]"
-            draggable={false}
-          />
-        </div>
-
-        {/* Mode Buttons */}
-        <div className="flex flex-col gap-0.5 w-full px-2">
-          {MODE_CONFIG.map(({ mode, label, icon: Icon, desc }) => (
-            <button
-              key={mode}
-              className={`nav-mode-btn flex flex-col items-center gap-1 py-2.5 px-1 rounded-xl border transition-all duration-200 relative w-full ${chatMode === mode
-                ? "active bg-neon-subtle text-neon border-neon/30 shadow-[0_0_12px_rgba(0,212,255,0.12)]"
-                : "bg-transparent border-transparent text-txt-muted hover:bg-glass-hover hover:text-txt-secondary hover:border-glass-border"
-                }`}
-              onClick={() => setChatMode(mode)}
-              title={desc}
-            >
-              <Icon size={20} strokeWidth={1.8} />
-              <span className="text-[0.6rem] font-semibold uppercase tracking-wide leading-none">{label}</span>
-            </button>
-          ))}
-        </div>
-
-        {/* Spacer */}
-        <div className="flex-1" />
-
-        {/* New Chat */}
-        <button
-          className="glass-btn flex flex-col items-center gap-1 py-2.5 px-1 mx-2 mb-2 bg-transparent border border-dashed border-glass-border rounded-xl text-txt-muted cursor-pointer transition-all duration-200 w-[calc(100%-16px)] hover:border-neon hover:text-neon hover:bg-neon-subtle hover:shadow-[0_0_12px_rgba(0,212,255,0.1)]"
-          onClick={addNewSession}
-          title="New conversation (Ctrl+T)"
-        >
-          <Plus size={18} strokeWidth={2} />
-          <span className="text-[0.6rem] font-semibold uppercase tracking-wide leading-none">New Chat</span>
-        </button>
-      </nav>
-
       {/* ══════════ MAIN CONTENT ══════════ */}
       <main className="flex-1 flex flex-col bg-void-900 min-w-0 relative">
         {/* ── Tab Bar (multi-session) ── */}
@@ -1033,41 +1033,14 @@ function App() {
           </div>
         </header>
 
-        {/* ── Vision Panel ── */}
-        {chatMode === "vision" && (
-          <div className="border-b border-glass-border bg-void-800 overflow-hidden animate-panel-slide">
-            <div className="flex items-center gap-2 py-2.5 px-6 text-[0.82rem] font-semibold text-txt-secondary border-b border-glass-border">
-              <ImageIcon size={16} strokeWidth={1.8} />
-              <span>Image Input</span>
-            </div>
-            <div className="p-3 px-6 max-h-[250px] overflow-y-auto">
-              <div className="flex gap-2.5 items-center mb-2.5">
-                <button onClick={selectImage} disabled={activeSession.loading}
-                  className="glass-btn inline-flex items-center gap-1.5 py-1.5 px-4 text-[0.78rem] font-medium rounded-lg cursor-pointer text-txt-secondary border border-glass-border transition-all duration-200 hover:text-txt hover:border-neon hover:shadow-[0_0_12px_rgba(0,212,255,0.1)] disabled:opacity-45 disabled:cursor-not-allowed">
-                  <ImageIcon size={14} /> Select Image
-                </button>
-                {imagePath && (
-                  <button onClick={clearImage} disabled={activeSession.loading}
-                    className="glass-btn inline-flex items-center gap-1.5 py-1.5 px-4 text-[0.78rem] font-medium rounded-lg cursor-pointer text-[#fca5a5] border border-[rgba(248,113,113,0.2)] transition-all duration-200 hover:bg-[rgba(248,113,113,0.1)] hover:border-[#f87171] hover:shadow-[0_0_12px_rgba(248,113,113,0.15)] disabled:opacity-45 disabled:cursor-not-allowed">
-                    <X size={14} /> Clear
-                  </button>
-                )}
-                {imagePath && (
-                  <span className="inline-flex items-center py-0.5 px-2.5 bg-void-700 border border-glass-border rounded-full text-[0.72rem] text-txt-secondary max-w-[200px] overflow-hidden text-ellipsis whitespace-nowrap">
-                    {imagePath.split(/[/\\]/).pop()}
-                  </span>
-                )}
-              </div>
-              {imagePreview && (
-                <img src={imagePreview} alt="Selected" className="max-w-full max-h-[180px] rounded-xl object-contain border border-glass-border" />
-              )}
-            </div>
-          </div>
-        )}
-
         {/* ── Podcast Mode ── */}
         {chatMode === "podcast" ? (
-          <PodcastTab hasDocuments={ragDocs.length > 0} />
+          <PodcastTab
+            hasDocuments={ragDocs.length > 0}
+            modeOptions={MODE_CONFIG.map(({ mode, label }) => ({ mode, label }))}
+            currentMode={chatMode}
+            onSelectMode={handleModeSwitch}
+          />
         ) : (
           <ChatWindow
             key={activeSession.id}
@@ -1085,9 +1058,18 @@ function App() {
             enrichmentStatus={enrichmentStatus}
             onIngestFile={ingestFile}
             onIngestDir={ingestDir}
+            onSelectVisionImage={selectImage}
+            visionImagePath={imagePath}
+            visionImagePreview={imagePreview}
+            onClearVisionImage={clearImage}
             onToggleDocPanel={() => setDocPanelOpen((v) => !v)}
+            chatMode={chatMode}
             showRagControls={chatMode === "text"}
             docPanelOpen={docPanelOpen}
+            modeOptions={MODE_CONFIG.map(({ mode, label }) => ({ mode, label }))}
+            currentMode={chatMode}
+            onSelectMode={handleModeSwitch}
+            modeSwitchNotice={modeSwitchNotice}
           />
         )}
 
