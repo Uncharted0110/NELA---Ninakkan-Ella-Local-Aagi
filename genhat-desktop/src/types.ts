@@ -13,6 +13,10 @@ export interface ChatMessage {
   };
   generateTime?: number;
   firstTokenTime?: number;
+  /** Optional audio output URL for assistant messages (audio mode, podcasts, etc). */
+  audioUrl?: string;
+  /** Whether this audio is saved in the sidebar (true), unsaved (false), or not applicable (undefined). */
+  audioSaved?: boolean;
 }
 
 export interface RegisteredModel {
@@ -87,8 +91,10 @@ export interface ChatSession {
   streamingContent: string;
   /** Whether this session is waiting for an LLM response. */
   loading: boolean;
-  /** Audio data URL for the last TTS output in this session. */
-  audioOutput: string;
+  /** Audio data URLs for all TTS outputs in this session. */
+  audioOutputs: string[];
+  /** (Deprecated) Last TTS output for backward compatibility. */
+  audioOutput?: string;
   /** Set to true when user manually cancels generation. */
   cancelled: boolean;
   /** Latest RAG result (sources + answer) for this session. */

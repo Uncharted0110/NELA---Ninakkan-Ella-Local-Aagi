@@ -25,8 +25,10 @@ import type {
 } from "./types";
 import { KITTEN_TTS_VOICES } from "./types";
 import ChatWindow from "./components/ChatWindow";
+import AudioPlayer from "./components/AudioPlayer";
 import ChatTabBar from "./components/ChatTabBar";
 import ChatHistorySidebar from "./components/ChatHistorySidebar";
+import SidebarNav from "./components/SidebarNav";
 import ModelSelector from "./components/ModelSelector";
 import PdfViewer from "./components/PdfViewer";
 import DocumentViewer from "./components/DocumentViewer";
@@ -79,7 +81,7 @@ function createEmptySession(): ChatSession {
     messages: [],
     streamingContent: "",
     loading: false,
-    audioOutput: "",
+    audioOutputs: [],
     cancelled: false,
     ragResult: null,
     mediaAssets: {},
@@ -109,7 +111,9 @@ function normalizeSession(raw: Partial<ChatSession>): ChatSession {
     messages,
     streamingContent: "",
     loading: false,
-    audioOutput: typeof raw.audioOutput === "string" ? raw.audioOutput : "",
+    audioOutputs: Array.isArray(raw.audioOutputs)
+      ? raw.audioOutputs
+      : (typeof raw.audioOutput === "string" && raw.audioOutput ? [raw.audioOutput] : []),
     cancelled: false,
     ragResult: raw.ragResult ?? null,
     mediaAssets: raw.mediaAssets ?? {},
@@ -236,7 +240,7 @@ function App() {
     [activeSessionId]
   );
 
-  /** Close a session by ID. If it's the last one, create a fresh session. */
+  /** Close a session by ID. Allow zero sessions. */
   const closeSession = useCallback(
     (sessionId: string) => {
       // Abort any in-flight request for this session
@@ -247,11 +251,9 @@ function App() {
         const remaining = prev.filter((s) => s.id !== sessionId);
         setOpenSessionIds((openPrev) => openPrev.filter((id) => id !== sessionId));
         if (remaining.length === 0) {
-          // Last tab closed — create a fresh one
-          const fresh = createEmptySession();
-          setOpenSessionIds([fresh.id]);
-          setActiveSessionId(fresh.id);
-          return [fresh];
+          setOpenSessionIds([]);
+          setActiveSessionId("");
+          return [];
         }
         // If the closed tab was active, activate the nearest neighbor
         if (sessionId === activeSessionId) {
@@ -716,7 +718,7 @@ function App() {
       messages: [...prev.messages, newMsg],
       loading: true,
       streamingContent: "",
-      audioOutput: "",
+      audioOutputs: prev.audioOutputs ?? [],
       cancelled: false,
       ...titlePatch,
     }));
@@ -871,13 +873,15 @@ function App() {
           setTtsGenerationTime(totalTime);
 
           updateSession(sid, (prev) => ({
-            audioOutput: audioUrl,
+            audioOutputs: [(prev.audioOutputs ?? []), audioUrl].flat(),
+            audioOutput: audioUrl, // for backward compatibility
             messages: [
               ...prev.messages,
               {
                 role: "assistant" as const,
                 content: `🔊 Audio generated (${ttsVoice}, ${ttsSpeed}x speed).`,
-                generateTime: totalTime
+                generateTime: totalTime,
+                audioUrl: audioUrl,
               },
             ],
           }));
@@ -1135,15 +1139,129 @@ function App() {
     .map((id) => sessions.find((s) => s.id === id))
     .filter((s): s is ChatSession => !!s);
 
+  // Sidebar section state with toggle logic
+  const [sidebarSection, setSidebarSection] = useState<"chats" | "audio" | "mindmaps" | null>("chats");
+
+  // Toggle handler for sidebar
+  const handleSidebarNav = (section: "chats" | "audio" | "mindmaps") => {
+    setSidebarSection((prev) => (prev === section ? null : section));
+  };
+
+  // Placeholder: audioFiles and mindmaps (replace with real data as needed)
+  const mindmaps: { id: string; name: string }[] = [];
+
+  // Handler to save audio to sidebar (set audioSaved=true)
+  const handleSaveAudioToSidebar = (msgIdx: number) => {
+    if (!activeSession) return;
+    updateSession(activeSession.id, (prev) => ({
+      messages: prev.messages.map((m, i) => i === msgIdx ? { ...m, audioSaved: true } : m)
+    }));
+  };
+
   return (
     <div className="flex h-full w-full">
-      <ChatHistorySidebar
-        sessions={sessions}
-        activeSessionId={activeSessionId}
-        onSelectSession={openSessionInViewer}
-        onNewSession={addNewSession}
-        onDeleteSession={closeSession}
-      />
+      <SidebarNav selected={sidebarSection} onSelect={handleSidebarNav} />
+      {/* Vertical blue line when sidebar is minimized */}
+          {sidebarSection === null && (
+        <div className="w-[4px] min-w-[4px] h-full bg-[#00d4ff] rounded-full mx-1 shadow-[0_0_16px_#00d4ff88] transition-all duration-200 opacity-100" />
+      )}
+      {/* Side section (chats/audio/mindmaps) */}
+      {sidebarSection !== null && (
+        <>
+          {/* Side section content */}
+          {sidebarSection === "chats" && (
+            <ChatHistorySidebar
+              sessions={sessions}
+              activeSessionId={activeSessionId}
+              onSelectSession={openSessionInViewer}
+              onNewSession={addNewSession}
+              onDeleteSession={closeSession}
+            />
+          )}
+          {sidebarSection === "audio" && (
+            <aside className="w-[280px] min-w-[280px] border-r border-glass-border bg-void-800/80 backdrop-blur-xl flex flex-col">
+              <div className="h-10 px-4 flex items-center justify-between shrink-0">
+                <div className="flex items-center gap-2 text-txt">
+                  <span className="text-2xl font-semibold mt-2">Audio</span>
+                </div>
+              </div>
+              <div className="flex-1 p-2 flex flex-col">
+                <div className="flex-1 bg-void-900 border border-glass-border rounded-xl p-2 flex flex-col gap-2 shadow-md overflow-y-auto overflow-x-hidden">
+                  {(() => {
+                    // Gather all audio messages from all sessions
+                    const allAudio = sessions.flatMap((session) =>
+                      session.messages
+                        .map((msg, idx, arr) => {
+                          if (!msg.audioUrl || msg.audioSaved === false) return null;
+                          // Find the most recent user message before this assistant message
+                          let userMsg = null;
+                          for (let i = idx - 1; i >= 0; i--) {
+                            if (arr[i].role === "user") {
+                              userMsg = arr[i];
+                              break;
+                            }
+                          }
+                          return {
+                            audioUrl: msg.audioUrl,
+                            sessionId: session.id,
+                            sessionTitle: session.title,
+                            msgIdx: idx,
+                            userQuery: userMsg ? userMsg.content : "(Unknown query)"
+                          };
+                        })
+                        .filter(Boolean)
+                    );
+                    return allAudio.length > 0 ? (
+                      <ul className="flex flex-col gap-2">
+                        {allAudio.map((item, idx) => (
+                          <li key={item.audioUrl} className="flex flex-col gap-1 group relative">
+                            <span className="text-[0.82rem] font-medium truncate">
+                              {item.userQuery}
+                            </span>
+                            <span className="text-[0.75rem] text-txt-muted truncate">{item.sessionTitle}</span>
+                            <AudioPlayer src={item.audioUrl} barCount={20} />
+                            <button
+                              className="absolute top-1 right-1 opacity-60 group-hover:opacity-100 transition-opacity text-danger hover:text-danger/80"
+                              title="Delete audio"
+                              onClick={() => {
+                                updateSession(item.sessionId, (prev) => ({
+                                  messages: prev.messages.map((m, i) => i === item.msgIdx ? { ...m, audioSaved: false } : m)
+                                }));
+                              }}
+                            >
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="text-[0.9rem] text-txt-muted">No audio generated yet for any session.</div>
+                    );
+                  })()}
+                </div>
+              </div>
+            </aside>
+          )}
+          {sidebarSection === "mindmaps" && (
+            <aside className="w-[280px] min-w-[280px] border-r border-glass-border bg-void-800/80 backdrop-blur-xl flex flex-col items-center justify-center text-txt-secondary">
+              <div className="w-full px-4 py-6">
+                <h2 className="text-lg font-semibold mb-2">Mindmaps</h2>
+                {mindmaps.length === 0 ? (
+                  <div className="text-[0.9rem] text-txt-muted">No mindmaps generated yet.</div>
+                ) : (
+                  <ul className="flex flex-col gap-2">
+                    {mindmaps.map((mm) => (
+                      <li key={mm.id} className="truncate text-neon">{mm.name}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </aside>
+          )}
+          {/* Vertical blue line between side section and chat window (less blue) */}
+          <div className="w-[4px] min-w-[4px] h-full bg-[#00d4ff]/40 rounded-full mx-1 shadow-[0_0_8px_#00d4ff33] transition-all duration-200 opacity-60" />
+        </>
+      )}
 
       {/* ══════════ MAIN CONTENT ══════════ */}
       <main className="flex-1 flex flex-col bg-void-900 min-w-0 relative">
@@ -1264,6 +1382,7 @@ function App() {
             onCancel={handleCancel}
             cancelled={activeSession.cancelled}
             audioSrc={activeSession.audioOutput}
+            audioOutputs={activeSession.audioOutputs}
             placeholder={getPlaceholder()}
             mediaAssets={activeSession.mediaAssets}
             ragDocs={ragDocs}
@@ -1283,6 +1402,8 @@ function App() {
             currentMode={chatMode}
             onSelectMode={handleModeSwitch}
             modeSwitchNotice={modeSwitchNotice}
+            saveAudioToSidebar={handleSaveAudioToSidebar}
+            session={activeSession}
           />
         )}
 

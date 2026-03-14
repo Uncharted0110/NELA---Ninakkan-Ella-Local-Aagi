@@ -7,18 +7,19 @@ interface AudioPlayerProps {
   src: string;
   /** If true, start playing immediately on mount */
   autoPlay?: boolean;
+  barCount?: number; // Optional: override number of bars in waveform
 }
 
 /* ─── Constants ─────────────────────────────────────────────────────────────── */
 
-const BAR_COUNT = 48;
+// Default bar count, can be overridden by prop
+const DEFAULT_BAR_COUNT = 48;
 const BAR_WIDTH = 3;
 const BAR_GAP = 1.5;
 const BAR_MIN_H = 2;
 const BAR_MAX_H = 32;
 const BAR_RADIUS = 1.5;
 const CANVAS_H = 40;
-const CANVAS_W = (BAR_WIDTH + BAR_GAP) * BAR_COUNT;
 const SMOOTHING = 0.6;
 /** How fast bars rise toward target */
 const LERP_UP = 0.2;
@@ -27,7 +28,11 @@ const LERP_DOWN = 0.08;
 
 /* ─── Component ─────────────────────────────────────────────────────────────── */
 
-export default function AudioPlayer({ src, autoPlay = false }: AudioPlayerProps) {
+import React from "react";
+
+const AudioPlayer: React.FC<AudioPlayerProps> = function AudioPlayer({ src, autoPlay = false, barCount }) {
+  const BAR_COUNT = barCount ?? DEFAULT_BAR_COUNT;
+  const CANVAS_W = (BAR_WIDTH + BAR_GAP) * BAR_COUNT;
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef(0);
@@ -385,4 +390,6 @@ export default function AudioPlayer({ src, autoPlay = false }: AudioPlayerProps)
       </div>
     </div>
   );
-}
+};
+
+export default React.memo(AudioPlayer);

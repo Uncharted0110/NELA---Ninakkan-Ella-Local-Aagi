@@ -34,23 +34,21 @@ const ChatHistorySidebar: React.FC<ChatHistorySidebarProps> = ({
 }) => {
   return (
     <aside className="w-[280px] min-w-[280px] border-r border-glass-border bg-void-800/80 backdrop-blur-xl flex flex-col">
-      <div className="h-14 px-4 border-b border-glass-border flex items-center justify-between shrink-0">
+      <div className="h-10 px-4 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2 text-txt">
-          <MessageSquare size={16} className="text-neon" />
-          <span className="text-[0.86rem] font-semibold">Chats</span>
+          <span className="text-2xl font-semibold mt-2">Chats</span>
         </div>
         <button
-          className="glass-btn inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-[0.78rem] text-txt-secondary hover:text-neon"
+          className="glass-btn inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-[0.78rem] text-txt-secondary hover:text-neon mt-2"
           onClick={onNewSession}
           title="New chat"
         >
-          <Plus size={14} />
-          New
+          <Plus size={18} />
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-2">
-        <div className="flex flex-col gap-1.5">
+      <div className="flex-1 p-2 flex flex-col">
+        <div className="flex-1 bg-void-900 border border-glass-border rounded-xl p-2 flex flex-col gap-1.5 shadow-md overflow-y-auto">
           {sessions.map((session) => {
             const isActive = session.id === activeSessionId;
             const lastMessage = session.messages[session.messages.length - 1];

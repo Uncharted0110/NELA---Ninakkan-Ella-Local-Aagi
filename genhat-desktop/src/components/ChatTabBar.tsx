@@ -211,7 +211,7 @@ const ChatTabBar: React.FC<ChatTabBarProps> = memo(({
   };
 
   return (
-    <div className="chat-tab-bar flex items-center h-[38px] bg-void-800 border-b border-glass-border shrink-0 relative select-none">
+    <div className="chat-tab-bar flex items-center h-[40px] bg-void-800 border-b border-glass-border shrink-0 relative select-none">
       {/* Left scroll arrow */}
       {showLeftArrow && (
         <button
@@ -262,7 +262,7 @@ const ChatTabBar: React.FC<ChatTabBarProps> = memo(({
 
               {/* Drag grip handle */}
               <div
-                className={`drag-grip flex items-center justify-center w-[18px] h-[24px] rounded cursor-grab shrink-0 transition-colors duration-150
+                className={`drag-grip flex items-center justify-center w-[20px] h-[24px] rounded cursor-grab shrink-0 transition-colors duration-150
                   ${isActive
                     ? "text-txt-muted/60 hover:text-neon"
                     : "text-transparent group-hover:text-txt-muted/40 hover:!text-neon"
@@ -289,7 +289,7 @@ const ChatTabBar: React.FC<ChatTabBarProps> = memo(({
 
               {/* Close button */}
               <button
-                className={`chat-tab-close flex items-center justify-center w-[18px] h-[18px] rounded transition-all duration-150 shrink-0
+                className={`chat-tab-close flex items-center justify-center w-[18px] h-[1188px] rounded transition-all duration-150 shrink-0
                   ${isActive
                     ? "text-txt-muted hover:text-danger hover:bg-danger/10"
                     : "text-transparent group-hover:text-txt-muted hover:!text-danger hover:!bg-danger/10"

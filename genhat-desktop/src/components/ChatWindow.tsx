@@ -1,4 +1,19 @@
 import React, { useState, useEffect, useRef, memo } from "react";
+// ...existing code...
+// Add prop for saving audio
+import type { ChatSession } from "../types";
+
+interface SaveAudioHandler {
+  (msgIdx: number): void;
+}
+
+// ...existing code...
+// Add saveAudioToSidebar prop
+interface ChatWindowProps {
+  // ...existing code...
+  saveAudioToSidebar?: SaveAudioHandler;
+  session?: ChatSession;
+}
 import { MessageSquare, Eye, Volume2, Mic, FileText } from "lucide-react";
 import MarkdownRenderer from "./MarkdownRenderer";
 import AudioPlayer from "./AudioPlayer";
@@ -56,6 +71,7 @@ interface ChatWindowProps {
   onCancel?: () => void;
   cancelled?: boolean;
   audioSrc?: string;
+  audioOutputs?: string[];
   placeholder?: string;
   mediaAssets?: Record<number, MediaAsset[]>;
   chatMode?: string;
@@ -197,13 +213,11 @@ const ChatWindow: React.FC<ChatWindowProps> = memo(({
   onSend,
   onCancel,
   cancelled = false,
-  audioSrc,
   placeholder = "Message NELA...",
   mediaAssets = {},
   chatMode = "text",
   ttsGenerating = false,
   ttsElapsedTime = 0,
-  ttsGenerationTime = null,
   generalGenerating = false,
   generalElapsedTime = 0,
   generalGenerationTime = null,
@@ -223,6 +237,8 @@ const ChatWindow: React.FC<ChatWindowProps> = memo(({
   currentMode = "text",
   onSelectMode,
   modeSwitchNotice = null,
+  saveAudioToSidebar = () => {},
+  session,
 }) => {
   const [inputObj, setInputObj] = useState("");
   const [showAttachMenu, setShowAttachMenu] = useState(false);
@@ -541,58 +557,74 @@ const ChatWindow: React.FC<ChatWindowProps> = memo(({
         {messages.map((msg, idx) => {
           const isNew = idx >= prevMsgCount;
           return (
-          <div key={idx} className={`${isNew ? "animate-msg-fade" : ""} flex gap-3 mb-6 max-w-3xl mx-auto ${msg.role === "user" ? "flex-row-reverse" : ""}`}>
-            {msg.role === "user" ? (
-              <>
-                <div className="flex flex-col items-end flex-1 min-w-0">
-                  <div className="py-3 px-4 rounded-2xl rounded-tr-sm text-[0.9rem] leading-relaxed text-txt max-w-[85%] bg-[rgba(0,212,255,0.04)] backdrop-blur-lg border border-[rgba(0,212,255,0.1)] shadow-[0_4px_20px_rgba(0,0,0,0.25),inset_0_1px_0_rgba(255,255,255,0.04)]">
-                    {msg.visionImage && (
-                      <div className="mb-2.5">
-                        <VisionMessageImage
-                          imagePath={msg.visionImage.path}
-                          imageName={msg.visionImage.name}
-                          onOpen={(src, title) => {
-                            setVisionZoom(1);
-                            setPreviewModal({ src, title });
-                          }}
-                        />
+            <React.Fragment key={idx}>
+              <div className={`${isNew ? "animate-msg-fade" : ""} flex gap-3 mb-6 max-w-3xl mx-auto ${msg.role === "user" ? "flex-row-reverse" : ""}`}>
+                {msg.role === "user" ? (
+                  <>
+                    <div className="flex flex-col items-end flex-1 min-w-0">
+                      <div className="py-3 px-4 rounded-2xl rounded-tr-sm text-[0.9rem] leading-relaxed text-txt max-w-[85%] bg-[rgba(0,212,255,0.04)] backdrop-blur-lg border border-[rgba(0,212,255,0.1)] shadow-[0_4px_20px_rgba(0,0,0,0.25),inset_0_1px_0_rgba(255,255,255,0.04)]">
+                        {msg.visionImage && (
+                          <div className="mb-2.5">
+                            <VisionMessageImage
+                              imagePath={msg.visionImage.path}
+                              imageName={msg.visionImage.name}
+                              onOpen={(src, title) => {
+                                setVisionZoom(1);
+                                setPreviewModal({ src, title });
+                              }}
+                            />
+                          </div>
+                        )}
+                        {msg.content}
                       </div>
-                    )}
-                    {msg.content}
-                  </div>
-                </div>
-                <div className="w-8 h-8 rounded-xl bg-neon-subtle text-neon flex items-center justify-center shrink-0 border border-neon/15 shadow-[0_2px_8px_rgba(0,212,255,0.1)]">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M12 12c2.761 0 5-2.239 5-5s-2.239-5-5-5-5 2.239-5 5 2.239 5 5 5z" fill="currentColor" />
-                    <path d="M4 20c0-3.3137 2.6863-6 6-6h4c3.3137 0 6 2.6863 6 6v1H4v-1z" fill="currentColor" />
-                  </svg>
-                </div>
-              </>
-            ) : (
-              <>
-                <img
-                  src="/logo-dark.png"
-                  alt="NELA"
-                  className="w-8 h-8 rounded-xl object-contain shrink-0 shadow-[0_2px_12px_rgba(0,212,255,0.25)]"
-                  draggable={false}
-                />
-                <div className="flex-1 min-w-0">
-                  <div className="text-[0.9rem] leading-relaxed text-txt glass rounded-2xl rounded-tl-sm py-3 px-4 shadow-[0_4px_20px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.03)]">
-                    <MarkdownRenderer content={msg.content} />
-                    {mediaAssets[idx] && <MediaGallery assets={mediaAssets[idx]} />}
-                    <div className="flex items-center gap-1 mt-2 pt-1.5">
-                      <CopyMsgButton text={msg.content} />
-                      {msg.generateTime !== undefined && (
-                        <span className="text-[0.7rem] text-txt-muted ml-1" title={msg.firstTokenTime !== undefined ? `Generated in ${msg.generateTime}s\nFirst token in ${msg.firstTokenTime}s` : `Generated in ${msg.generateTime}s`}>
-                          Generated in {msg.generateTime}s {msg.firstTokenTime !== undefined && `• First token in ${msg.firstTokenTime}s`}
-                        </span>
+                    </div>
+                    <div className="w-8 h-8 rounded-xl bg-neon-subtle text-neon flex items-center justify-center shrink-0 border border-neon/15 shadow-[0_2px_8px_rgba(0,212,255,0.1)]">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 12c2.761 0 5-2.239 5-5s-2.239-5-5-5-5 2.239-5 5 2.239 5 5 5z" fill="currentColor" />
+                        <path d="M4 20c0-3.3137 2.6863-6 6-6h4c3.3137 0 6 2.6863 6 6v1H4v-1z" fill="currentColor" />
+                      </svg>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <img
+                      src="/logo-dark.png"
+                      alt="NELA"
+                      className="w-8 h-8 rounded-xl object-contain shrink-0 shadow-[0_2px_12px_rgba(0,212,255,0.25)]"
+                      draggable={false}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[0.9rem] leading-relaxed text-txt glass rounded-2xl rounded-tl-sm py-3 px-4 shadow-[0_4px_20px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.03)]">
+                        <MarkdownRenderer content={msg.content} />
+                        {mediaAssets[idx] && <MediaGallery assets={mediaAssets[idx]} />}
+                        <div className="flex items-center gap-1 mt-2 pt-1.5">
+                          <CopyMsgButton text={msg.content} />
+                          {msg.generateTime !== undefined && (
+                            <span className="text-[0.7rem] text-txt-muted ml-1" title={msg.firstTokenTime !== undefined ? `Generated in ${msg.generateTime}s\nFirst token in ${msg.firstTokenTime}s` : `Generated in ${msg.generateTime}s`}>
+                              Generated in {msg.generateTime}s {msg.firstTokenTime !== undefined && `• First token in ${msg.firstTokenTime}s`}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      {/* Render AudioPlayer after assistant message if audioUrl is present */}
+                      {msg.audioUrl && (
+                        <div className="mt-2 flex items-center gap-2">
+                          <AudioPlayer src={msg.audioUrl} key={msg.audioUrl} />
+                          <button
+                            className="px-2 py-1 text-xs rounded bg-neon/10 text-neon border border-neon/30 hover:bg-neon/20 transition ml-1"
+                            style={{ marginLeft: 0 }}
+                            onClick={() => saveAudioToSidebar && saveAudioToSidebar(idx)}
+                            title="Save audio to sidebar"
+                          >
+                            Save
+                          </button>
+                        </div>
                       )}
                     </div>
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
+                  </>
+                )}
+              </div>
+            </React.Fragment>
           );
         })}
 
@@ -637,15 +669,7 @@ const ChatWindow: React.FC<ChatWindowProps> = memo(({
           </div>
         )}
 
-        {/* Audio Player */}
-        {audioSrc && (
-          <div className="max-w-3xl mx-auto mt-3">
-            {ttsGenerationTime !== null && (
-              <div className="text-[0.72rem] text-txt-muted mb-1">Generated in {ttsGenerationTime.toFixed(1)}s</div>
-            )}
-            <AudioPlayer src={audioSrc} autoPlay />
-          </div>
-        )}
+        {/* Audio Player (legacy block removed; now only rendered inline after assistant messages) */}
 
         {/* Response time completion */}
         {chatMode !== "audio" && generalGenerationTime !== null && !generalGenerating && (
